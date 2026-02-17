@@ -1,0 +1,160 @@
+terraform {
+  required_version = ">= 1.6.0"
+  
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"
+    }
+  }
+
+  # Backend configuration for state management
+backend "s3" {
+  bucket         = "distributed-platform-terraform-state"
+  key            = "prod/terraform.tfstate"
+  region         = "us-east-1"
+  encrypt        = true
+  use_lockfile   = true 
+
+  }
+}
+
+provider "aws" {
+  region = var.aws_region
+
+  default_tags {
+    tags = {
+      Project     = "DistributedStreamPlatform"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+    }
+  }
+}
+
+# Data sources
+data "aws_availability_zones" "available" {
+  state = "available"
+}
+
+# Local variables
+locals {
+  name_prefix = "dsp-${var.environment}"
+  azs         = slice(data.aws_availability_zones.available.names, 0, 3)
+  
+  common_tags = {
+    Project     = "DistributedStreamPlatform"
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  }
+}
+
+# VPC and Networking
+module "networking" {
+  source = "./modules/networking"
+
+  name_prefix        = local.name_prefix
+  vpc_cidr           = var.vpc_cidr
+  availability_zones = local.azs
+  environment        = var.environment
+  tags               = local.common_tags
+}
+
+# Compute Resources (ECS)
+module "compute" {
+  source = "./modules/compute"
+
+  name_prefix             = local.name_prefix
+  vpc_id                  = module.networking.vpc_id
+  private_subnet_ids      = module.networking.private_subnet_ids
+  public_subnet_ids       = module.networking.public_subnet_ids
+  alb_security_group_id   = module.networking.alb_security_group_id
+  ecs_security_group_id   = module.networking.ecs_security_group_id
+  environment             = var.environment
+  tags                    = local.common_tags
+
+  # Service configurations
+  event_ingestion_config = {
+    cpu    = 512
+    memory = 1024
+    count  = 2
+    image  = "${var.ecr_repository_url}/event-ingestion-service:${var.app_version}"
+  }
+
+  query_service_config = {
+    cpu    = 512
+    memory = 1024
+    count  = 2
+    image  = "${var.ecr_repository_url}/query-service:${var.app_version}"
+  }
+}
+
+# Database Resources
+module "database" {
+  source = "./modules/database"
+
+  name_prefix           = local.name_prefix
+  vpc_id                = module.networking.vpc_id
+  private_subnet_ids    = module.networking.private_subnet_ids
+  db_security_group_id  = module.networking.db_security_group_id
+  environment           = var.environment
+  tags                  = local.common_tags
+
+  # RDS PostgreSQL
+  postgres_instance_class = var.postgres_instance_class
+  postgres_allocated_storage = var.postgres_allocated_storage
+  
+  # ElastiCache Redis
+  redis_node_type = var.redis_node_type
+  redis_num_cache_nodes = var.redis_num_cache_nodes
+}
+
+# Messaging (MSK / Kafka)
+module "messaging" {
+  source = "./modules/messaging"
+
+  name_prefix            = local.name_prefix
+  vpc_id                 = module.networking.vpc_id
+  private_subnet_ids     = module.networking.private_subnet_ids
+  kafka_security_group_id = module.networking.kafka_security_group_id
+  environment            = var.environment
+  tags                   = local.common_tags
+
+  # MSK configuration
+  kafka_instance_type    = var.kafka_instance_type
+  kafka_ebs_volume_size  = var.kafka_ebs_volume_size
+  number_of_broker_nodes = var.number_of_broker_nodes
+}
+
+# Outputs
+output "vpc_id" {
+  description = "VPC ID"
+  value       = module.networking.vpc_id
+}
+
+output "alb_dns_name" {
+  description = "Application Load Balancer DNS name"
+  value       = module.compute.alb_dns_name
+}
+
+output "ecs_cluster_name" {
+  description = "ECS Cluster name"
+  value       = module.compute.ecs_cluster_name
+}
+
+output "rds_endpoint" {
+  description = "RDS PostgreSQL endpoint"
+  value       = module.database.rds_endpoint
+  sensitive   = true
+}
+
+output "redis_endpoint" {
+  description = "ElastiCache Redis endpoint"
+  value       = module.database.redis_endpoint
+  sensitive   = true
+}
+
+output "msk_bootstrap_brokers" {
+  description = "MSK Kafka bootstrap brokers"
+  value       = module.messaging.msk_bootstrap_brokers
+  sensitive   = true
+}
