@@ -1,0 +1,48 @@
+# Compiled files
+target/
+*.class
+*.jar
+*.war
+*.ear
+*.log
+
+# IDE files
+.idea/
+*.iml
+*.iws
+*.ipr
+.classpath
+.project
+.settings/
+.vscode/
+.metadata
+
+# Build tools
+dependency-reduced-pom.xml
+pom.xml.versionsBackup
+*.releaseBackup
+
+# Node modules
+node_modules/
+frontend/dashboard/node_modules/
+frontend/dashboard/dist/
+frontend/dashboard/build/
+
+# Environment files
+.env
+application-local.yml
+*.pem
+*.key
+*.crt
+
+# Logs
+logs/
+*.log
+
+# Docker volumes
+data/
+volumes/
+
+# OS files
+.DS_Store
+Thumbs.db
