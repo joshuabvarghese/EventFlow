@@ -141,7 +141,7 @@ EventFlow/
 ├── amplify.yml                       # AWS Amplify config
 └── README.md
 
-
+```
 ## 🚀 **Quick Start (Local Development)**
 
 ### **Prerequisites**
@@ -152,29 +152,35 @@ EventFlow/
 
 ### **Run Locally**
 
-```bash
 # 1. Clone the repository
+```bash
 git clone https://github.com/joshuabvarghese/EventFlow.git
 cd EventFlow
+```
 
 # 2. Start infrastructure (Kafka, Redis, PostgreSQL)
+```bash
 cd infrastructure/docker
 docker-compose up -d
+```
 
 # 3. Create Kafka topics
+```bash
 docker exec kafka kafka-topics --create --if-not-exists \
   --bootstrap-server localhost:9092 \
   --topic events.raw --partitions 10 --replication-factor 1
 # ... (repeat for other topics)
-
+```
 # 4. Build and run backend
+```bash
 cd services/event-ingestion-service
 mvn clean package
 java -jar target/event-ingestion-service-*.jar
-
+```
 # 5. Start frontend dashboard
+```bash
 cd frontend/dashboard
 npm install
 npm run dev
-
+```
 ---
