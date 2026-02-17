@@ -1,0 +1,114 @@
+spring:
+  application:
+    name: event-ingestion-service
+  
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all  # Wait for all replicas to acknowledge
+      retries: 3
+      compression-type: snappy
+      batch-size: 16384
+      linger-ms: 10
+      properties:
+        # Idempotence for exactly-once semantics
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        # Timeouts
+        request.timeout.ms: 30000
+        delivery.timeout.ms: 120000
+    
+    properties:
+      # Client ID for monitoring
+      client.id: ${spring.application.name}-${random.uuid}
+
+  redis:
+    host: ${REDIS_HOST:localhost}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    timeout: 2000ms
+    lettuce:
+      pool:
+        max-active: 8
+        max-idle: 8
+        min-idle: 2
+        max-wait: 2000ms
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+      indent-output: false
+
+server:
+  port: 8081
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html,text/xml,text/plain
+  http2:
+    enabled: true
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 10
+    connection-timeout: 20000
+
+# Actuator for health checks and metrics
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+      environment: ${ENVIRONMENT:local}
+  health:
+    redis:
+      enabled: true
+    kafka:
+      enabled: true
+
+# Logging
+logging:
+  level:
+    root: INFO
+    com.platform: DEBUG
+    org.apache.kafka: WARN
+    org.springframework.kafka: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg - %X{correlationId}%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg - %X{correlationId}%n"
+  file:
+    name: logs/event-ingestion.log
+    max-size: 100MB
+    max-history: 30
+    total-size-cap: 1GB
+
+# Application-specific configuration
+app:
+  kafka:
+    topics:
+      raw-events: events.raw
+      user-events: events.user
+      transaction-events: events.transaction
+      analytics-events: events.analytics
+      system-events: events.system
+      critical-events: events.critical
+      dead-letter-queue: events.dlq
+  
+  ingestion:
+    max-batch-size: 1000
+    deduplication-ttl-hours: 24
+    max-event-size-mb: 1
