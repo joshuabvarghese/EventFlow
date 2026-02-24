@@ -16,8 +16,6 @@
 
 **Frontend Dashboard:** [https://frontend.d1w981rd1y5z53.amplifyapp.com](https://frontend.d1w981rd1y5z53.amplifyapp.com)
 
-![EventFlow Dashboard](demo.png)
-*Real-time monitoring dashboard with brutalist design*
 
 ---
 
@@ -29,6 +27,8 @@ Events are ingested via a REST API, deduplicated using Redis, routed to typed Ka
 
 
 ---
+![EventFlow Dashboard](demo.png)
+
 
 ## ✨ **Key Features**
 
@@ -140,6 +140,7 @@ EventFlow/
 ├── scripts/                         # Automation scripts
 ├── amplify.yml                       # AWS Amplify config
 └── README.md
+```
 
 
 ## 🚀 **Quick Start (Local Development)**
@@ -152,29 +153,41 @@ EventFlow/
 
 ### **Run Locally**
 
-```bash
+
 # 1. Clone the repository
+
+```bash
 git clone https://github.com/joshuabvarghese/EventFlow.git
 cd EventFlow
+```
 
 # 2. Start infrastructure (Kafka, Redis, PostgreSQL)
+```bash
 cd infrastructure/docker
 docker-compose up -d
-
+```
 # 3. Create Kafka topics
+```bash
 docker exec kafka kafka-topics --create --if-not-exists \
   --bootstrap-server localhost:9092 \
   --topic events.raw --partitions 10 --replication-factor 1
 # ... (repeat for other topics)
-
+\
+```
 # 4. Build and run backend
+```bash
 cd services/event-ingestion-service
 mvn clean package
 java -jar target/event-ingestion-service-*.jar
 
+```
+
 # 5. Start frontend dashboard
+```bash
 cd frontend/dashboard
 npm install
 npm run dev
+
+```
 
 ---
