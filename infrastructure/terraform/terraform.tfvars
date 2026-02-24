@@ -1,0 +1,12 @@
+environment = "dev"
+aws_region = "us-east-1"
+ecr_repository_url = "123456789.dkr.ecr.us-east-1.amazonaws.com"
+vpc_cidr = "10.0.0.0/16"
+app_version = "latest"
+postgres_instance_class = "db.t3.micro"
+postgres_allocated_storage = 20
+redis_node_type = "cache.t3.micro"
+redis_num_cache_nodes = 1
+kafka_instance_type = "kafka.t3.small"
+kafka_ebs_volume_size = 100
+number_of_broker_nodes = 3
