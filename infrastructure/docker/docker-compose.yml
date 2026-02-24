@@ -26,12 +26,11 @@ services:
       - zookeeper-logs:/var/lib/zookeeper/log
     networks:
       - platform-network
-    # Use zookeeper-shell (built into Confluent image) instead of nc which is not installed
     healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | /usr/bin/zookeeper-shell localhost:2181 2>/dev/null | grep -q imok || exit 1"]
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
       interval: 10s
-      timeout: 10s
-      retries: 10
+      timeout: 5s
+      retries: 5
       start_period: 30s
 
   kafka:
