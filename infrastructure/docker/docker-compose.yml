@@ -10,29 +10,7 @@ version: '3.8'
 #   docker compose down -v        → stop and delete all data
 services:
 
-  # ── Kafka (via Zookeeper) ────────────────────────────────────────────────────
-
-  zookeeper:
-    image: confluentinc/cp-zookeeper:7.6.0
-    container_name: zookeeper
-    restart: unless-stopped
-    ports:
-      - "2181:2181"
-    environment:
-      ZOOKEEPER_CLIENT_PORT: 2181
-      ZOOKEEPER_TICK_TIME: 2000
-    volumes:
-      - zookeeper-data:/var/lib/zookeeper/data
-      - zookeeper-logs:/var/lib/zookeeper/log
-    networks:
-      - platform-network
-    # Use zookeeper-shell (built into Confluent image) instead of nc which is not installed
-    healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | /usr/bin/zookeeper-shell localhost:2181 2>/dev/null | grep -q imok || exit 1"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 30s
+  # ── Kafka────────────────────────────────────────────────────
 
   kafka:
     image: confluentinc/cp-kafka:7.6.0
