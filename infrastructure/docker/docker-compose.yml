@@ -27,7 +27,7 @@ services:
     networks:
       - platform-network
     healthcheck:
-      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181 | grep imok"]
+      test: ["CMD", "bash", "-c", "echo 'srvr' | nc localhost 2181 | grep -q 'Zookeeper version' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -182,10 +182,11 @@ services:
     networks:
       - platform-network
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 30s
 
   grafana:
     image: grafana/grafana:latest
