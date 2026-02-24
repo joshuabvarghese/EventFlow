@@ -2,7 +2,6 @@
 
 set -e
 
-# Colors
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
@@ -10,165 +9,150 @@ RED='\033[0;31m'
 NC='\033[0m'
 
 echo ""
-echo "╔════════════════════════════════════════════════════════════╗"
-echo "║                                                            ║"
-echo "║      DISTRIBUTED STREAM PLATFORM - QUICK START            ║"
-echo "║                                                            ║"
-echo "╚════════════════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║           EventFlow — Distributed Stream Platform        ║"
+echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 
-# Check prerequisites
-echo -e "${BLUE}[1/6]${NC} Checking prerequisites..."
+# ── Prerequisites ──────────────────────────────────────────────────────────────
+echo -e "${BLUE}[1/6]${NC} Checking prerequisites…"
 
-if ! command -v java &> /dev/null; then
-    echo -e "${RED}✗ Java not found. Please install Java 17+${NC}"
-    exit 1
+fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
+
+command -v java   >/dev/null 2>&1 || fail "Java 17+ required. Install from https://adoptium.net"
+command -v docker >/dev/null 2>&1 || fail "Docker required. Install from https://docker.com"
+
+if docker compose version >/dev/null 2>&1; then
+  DOCKER_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  DOCKER_COMPOSE="docker-compose"
+else
+  fail "Docker Compose required."
 fi
 
-if ! command -v mvn &> /dev/null; then
-    echo -e "${RED}✗ Maven not found. Please install Maven 3.8+${NC}"
-    exit 1
+if [ -f "./mvnw" ]; then
+  MVN="./mvnw"
+elif command -v mvn >/dev/null 2>&1; then
+  MVN="mvn"
+else
+  fail "Maven (or ./mvnw) required."
 fi
 
-if ! command -v docker &> /dev/null; then
-    echo -e "${RED}✗ Docker not found. Please install Docker${NC}"
-    exit 1
-fi
-
-if ! command -v docker-compose &> /dev/null; then
-    echo -e "${RED}✗ Docker Compose not found. Please install Docker Compose${NC}"
-    exit 1
-fi
-
-echo -e "${GREEN}✓ All prerequisites met${NC}"
+echo -e "${GREEN}✓ Prerequisites OK (Docker Compose: $DOCKER_COMPOSE, Maven: $MVN)${NC}"
 echo ""
 
-# Start infrastructure
-echo -e "${BLUE}[2/6]${NC} Starting infrastructure (Kafka, PostgreSQL, Redis, etc.)..."
+# ── Ensure logs directory exists ───────────────────────────────────────────────
+mkdir -p logs
+
+# ── Infrastructure ─────────────────────────────────────────────────────────────
+echo -e "${BLUE}[2/6]${NC} Starting infrastructure (Kafka, PostgreSQL, Redis, Elasticsearch…)"
 cd infrastructure/docker
-docker-compose up -d
+$DOCKER_COMPOSE up -d
+cd ../..
 
-echo -e "${YELLOW}⏳ Waiting for services to be ready (60 seconds)...${NC}"
+echo -e "${YELLOW}  Waiting 60 s for services to be healthy…${NC}"
 sleep 60
-
-# Verify services are up
 echo -e "${GREEN}✓ Infrastructure started${NC}"
-docker-compose ps
 echo ""
 
-# Create Kafka topics
-echo -e "${BLUE}[3/6]${NC} Creating Kafka topics..."
+# ── Kafka topics ───────────────────────────────────────────────────────────────
+echo -e "${BLUE}[3/6]${NC} Creating Kafka topics…"
 
-topics=(
-    "events.raw:10:1"
-    "events.user:5:1"
-    "events.transaction:5:1"
-    "events.analytics:5:1"
-    "events.system:3:1"
-    "events.critical:3:1"
-    "events.dlq:1:1"
+declare -A TOPICS=(
+  ["events.raw"]="10"
+  ["events.user"]="5"
+  ["events.transaction"]="5"
+  ["events.analytics"]="5"
+  ["events.system"]="3"
+  ["events.critical"]="3"
+  ["events.dlq"]="1"
 )
 
-for topic_config in "${topics[@]}"; do
-    IFS=':' read -r topic partitions replication <<< "$topic_config"
-    docker exec kafka kafka-topics --create --if-not-exists \
-        --bootstrap-server localhost:9092 \
-        --topic "$topic" \
-        --partitions "$partitions" \
-        --replication-factor "$replication" &> /dev/null || true
-    echo -e "${GREEN}✓${NC} Created topic: $topic"
+for topic in "${!TOPICS[@]}"; do
+  docker exec kafka kafka-topics --create --if-not-exists \
+    --bootstrap-server localhost:9092 \
+    --topic "$topic" \
+    --partitions "${TOPICS[$topic]}" \
+    --replication-factor 1 >/dev/null 2>&1 || true
+  echo -e "  ${GREEN}✓${NC} $topic"
 done
-
 echo ""
 
-# Build service
-echo -e "${BLUE}[4/6]${NC} Building Event Ingestion Service..."
-cd ../..
+# ── Build ──────────────────────────────────────────────────────────────────────
+echo -e "${BLUE}[4/6]${NC} Building event-ingestion-service…"
 cd services/event-ingestion-service
 
-if [ ! -f "target/event-ingestion-service-1.0.0-SNAPSHOT.jar" ]; then
-    mvn clean package -DskipTests -q
-    echo -e "${GREEN}✓ Build complete${NC}"
+JAR_PATH="target/event-ingestion-service-1.0.0-SNAPSHOT.jar"
+if [ -f "$JAR_PATH" ]; then
+  echo -e "${YELLOW}  Using existing JAR (delete target/ to force rebuild)${NC}"
 else
-    echo -e "${YELLOW}⚠ Using existing JAR (delete target/ to rebuild)${NC}"
+  $MVN clean package -DskipTests -q
+  echo -e "${GREEN}✓ Build complete${NC}"
 fi
-
+cd ../..
 echo ""
 
-# Start the service in background
-echo -e "${BLUE}[5/6]${NC} Starting Event Ingestion Service..."
-cd ../..
-
-# Kill any existing Java process on port 8081
+# ── Stop any running instance ──────────────────────────────────────────────────
+echo -e "${BLUE}[5/6]${NC} Starting Event Ingestion Service…"
+if [ -f ".service.pid" ]; then
+  OLD_PID=$(cat .service.pid)
+  if ps -p "$OLD_PID" >/dev/null 2>&1; then
+    echo -e "${YELLOW}  Stopping previous instance (PID $OLD_PID)…${NC}"
+    kill "$OLD_PID" 2>/dev/null || true
+    sleep 2
+  fi
+  rm -f .service.pid
+fi
 lsof -ti:8081 | xargs kill -9 2>/dev/null || true
 
-# Start service in background
-nohup java -jar services/event-ingestion-service/target/event-ingestion-service-*.jar \
-    > logs/event-ingestion.log 2>&1 &
+nohup java \
+  -Xms256m -Xmx512m \
+  -Dspring.profiles.active=local \
+  -jar services/event-ingestion-service/target/event-ingestion-service-*.jar \
+  > logs/event-ingestion.log 2>&1 &
 
 SERVICE_PID=$!
 echo $SERVICE_PID > .service.pid
 
-echo -e "${YELLOW}⏳ Waiting for service to start...${NC}"
-for i in {1..30}; do
-    if curl -s http://localhost:8081/actuator/health > /dev/null 2>&1; then
-        echo -e "${GREEN}✓ Service started (PID: $SERVICE_PID)${NC}"
-        break
-    fi
-    sleep 2
-    if [ $i -eq 30 ]; then
-        echo -e "${RED}✗ Service failed to start. Check logs/event-ingestion.log${NC}"
-        exit 1
-    fi
+echo -e "${YELLOW}  Waiting for service to start (PID $SERVICE_PID)…${NC}"
+for i in $(seq 1 30); do
+  if curl -sf http://localhost:8081/actuator/health >/dev/null 2>&1; then
+    echo -e "${GREEN}✓ Service is healthy${NC}"
+    break
+  fi
+  sleep 2
+  if [ $i -eq 30 ]; then
+    echo -e "${RED}✗ Service failed to start after 60 s.${NC}"
+    echo -e "${RED}  Check: tail -50 logs/event-ingestion.log${NC}"
+    exit 1
+  fi
 done
-
 echo ""
 
-# Instructions for dashboard
-echo -e "${BLUE}[6/6]${NC} To start the dashboard (optional):"
+# ── Dashboard instructions ─────────────────────────────────────────────────────
+echo -e "${BLUE}[6/6]${NC} Start the React dashboard (separate terminal):"
 echo ""
 echo "  cd frontend/dashboard"
-echo "  npm install    # First time only"
+echo "  npm install   # first time only"
 echo "  npm run dev"
 echo ""
 
-echo "╔════════════════════════════════════════════════════════════╗"
-echo "║                                                            ║"
-echo "║                   ✓ PLATFORM READY!                        ║"
-echo "║                                                            ║"
-echo "╚════════════════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║                   ✓  PLATFORM READY                     ║"
+echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
-echo -e "${GREEN}Services Running:${NC}"
+echo -e "${GREEN}Endpoints:${NC}"
+echo "  API:           http://localhost:8081/api/v1/events"
+echo "  Stats:         http://localhost:8081/api/v1/events/stats"
+echo "  Health:        http://localhost:8081/api/v1/events/health"
+echo "  Prometheus:    http://localhost:8081/actuator/prometheus"
+echo "  Kafka UI:      http://localhost:8082"
+echo "  Grafana:       http://localhost:3001  (admin / admin)"
+echo "  Jaeger:        http://localhost:16686"
 echo ""
-echo "  📊 Event Ingestion API:  http://localhost:8081"
-echo "  📈 Actuator Metrics:     http://localhost:8081/actuator"
-echo "  🔍 Kafka UI:             http://localhost:8082"
-echo "  📉 Grafana:              http://localhost:3001 (admin/admin)"
-echo "  🔎 Jaeger Tracing:       http://localhost:16686"
-echo "  🗄️  PostgreSQL:           localhost:5432"
-echo "  🔴 Redis:                localhost:6379"
-echo ""
-echo -e "${GREEN}Quick Commands:${NC}"
-echo ""
-echo "  # Send 100 test events"
-echo "  ./scripts/send-test-events.sh"
-echo ""
-echo "  # Check service health"
-echo "  curl http://localhost:8081/api/v1/events/health | jq"
-echo ""
-echo "  # View statistics"
+echo -e "${GREEN}Quick commands:${NC}"
+echo "  ./scripts/send-test-events.sh          # send 100 demo events"
 echo "  curl http://localhost:8081/api/v1/events/stats | jq"
-echo ""
-echo "  # Send a single event"
-echo "  curl -X POST http://localhost:8081/api/v1/events \\"
-echo "    -H 'Content-Type: application/json' \\"
-echo "    -d '{\"eventType\":\"user.signup\",\"userId\":\"demo_123\",\"timestamp\":\"2024-02-15T10:30:00.000Z\",\"data\":{}}'"
-echo ""
-echo "  # View service logs"
 echo "  tail -f logs/event-ingestion.log"
-echo ""
-echo "  # Stop everything"
 echo "  ./scripts/stop-all.sh"
-echo ""
-echo -e "${YELLOW}💡 Tip:${NC} Start with './scripts/send-test-events.sh' to see events flowing!"
 echo ""

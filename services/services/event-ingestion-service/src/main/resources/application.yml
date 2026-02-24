@@ -1,40 +1,37 @@
 spring:
   application:
     name: event-ingestion-service
-  
+
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
-      acks: all  # Wait for all replicas to acknowledge
+      acks: all
       retries: 3
       compression-type: snappy
       batch-size: 16384
       linger-ms: 10
       properties:
-        # Idempotence for exactly-once semantics
         enable.idempotence: true
         max.in.flight.requests.per.connection: 5
-        # Timeouts
         request.timeout.ms: 30000
         delivery.timeout.ms: 120000
-    
-    properties:
-      # Client ID for monitoring
-      client.id: ${spring.application.name}-${random.uuid}
+        client.id: ${spring.application.name}
 
-  redis:
-    host: ${REDIS_HOST:localhost}
-    port: ${REDIS_PORT:6379}
-    password: ${REDIS_PASSWORD:}
-    timeout: 2000ms
-    lettuce:
-      pool:
-        max-active: 8
-        max-idle: 8
-        min-idle: 2
-        max-wait: 2000ms
+  # Spring Boot 3.x: spring.data.redis (not spring.redis)
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 2000ms
 
   jackson:
     default-property-inclusion: non_null
@@ -46,7 +43,7 @@ server:
   port: 8081
   compression:
     enabled: true
-    mime-types: application/json,application/xml,text/html,text/xml,text/plain
+    mime-types: application/json,application/xml,text/html,text/plain
   http2:
     enabled: true
   tomcat:
@@ -55,7 +52,6 @@ server:
       min-spare: 10
     connection-timeout: 20000
 
-# Actuator for health checks and metrics
 management:
   endpoints:
     web:
@@ -67,10 +63,12 @@ management:
       show-details: always
       probes:
         enabled: true
-  metrics:
-    export:
-      prometheus:
+  # Spring Boot 3.x prometheus export config
+  prometheus:
+    metrics:
+      export:
         enabled: true
+  metrics:
     tags:
       application: ${spring.application.name}
       environment: ${ENVIRONMENT:local}
@@ -79,24 +77,26 @@ management:
       enabled: true
     kafka:
       enabled: true
+  tracing:
+    sampling:
+      probability: 1.0
 
-# Logging
 logging:
   level:
     root: INFO
     com.platform: DEBUG
     org.apache.kafka: WARN
     org.springframework.kafka: INFO
+    org.springframework.web.cors: DEBUG
   pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg - %X{correlationId}%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg - %X{correlationId}%n"
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %highlight(%-5level) %cyan(%logger{36}) - %msg [correlationId=%X{correlationId}]%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg [correlationId=%X{correlationId}]%n"
   file:
     name: logs/event-ingestion.log
     max-size: 100MB
     max-history: 30
     total-size-cap: 1GB
 
-# Application-specific configuration
 app:
   kafka:
     topics:
@@ -107,8 +107,15 @@ app:
       system-events: events.system
       critical-events: events.critical
       dead-letter-queue: events.dlq
-  
+
   ingestion:
     max-batch-size: 1000
     deduplication-ttl-hours: 24
     max-event-size-mb: 1
+
+  # CORS — matches React dev server and Amplify deployment
+  cors:
+    allowed-origins:
+      - http://localhost:3000
+      - http://localhost:5173
+      - https://frontend.d1w981rd1y5z53.amplifyapp.com

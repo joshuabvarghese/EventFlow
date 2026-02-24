@@ -3,79 +3,105 @@
 set -e
 
 echo "=================================="
-echo "Distributed Stream Platform Setup"
+echo "  EventFlow Platform — Local Setup"
 echo "=================================="
 echo ""
 
-# Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Check prerequisites
+# ── Prerequisites ──────────────────────────────────────────────────────────────
 echo -e "${YELLOW}Checking prerequisites...${NC}"
 
-command -v java >/dev/null 2>&1 || { echo -e "${RED}Java 17+ is required but not installed.${NC}" >&2; exit 1; }
-command -v mvn >/dev/null 2>&1 || { echo -e "${RED}Maven is required but not installed.${NC}" >&2; exit 1; }
-command -v docker >/dev/null 2>&1 || { echo -e "${RED}Docker is required but not installed.${NC}" >&2; exit 1; }
-command -v docker-compose >/dev/null 2>&1 || { echo -e "${RED}Docker Compose is required but not installed.${NC}" >&2; exit 1; }
+fail() { echo -e "${RED}✗ $1${NC}" >&2; exit 1; }
+
+command -v java   >/dev/null 2>&1 || fail "Java 17+ is required but not installed."
+command -v docker >/dev/null 2>&1 || fail "Docker is required but not installed."
+command -v curl   >/dev/null 2>&1 || fail "curl is required but not installed."
+
+# Accept either 'docker compose' (v2 plugin) or 'docker-compose' (v1 standalone)
+if docker compose version >/dev/null 2>&1; then
+  DOCKER_COMPOSE="docker compose"
+elif command -v docker-compose >/dev/null 2>&1; then
+  DOCKER_COMPOSE="docker-compose"
+else
+  fail "Docker Compose is required but not installed."
+fi
+
+# Maven wrapper preferred; fall back to system mvn
+if [ -f "./mvnw" ]; then
+  MVN="./mvnw"
+elif command -v mvn >/dev/null 2>&1; then
+  MVN="mvn"
+else
+  fail "Maven (or ./mvnw) is required but not installed."
+fi
 
 echo -e "${GREEN}✓ All prerequisites met${NC}"
 echo ""
 
-# Start infrastructure
-echo -e "${YELLOW}Starting infrastructure services...${NC}"
+# ── Create required directories ────────────────────────────────────────────────
+mkdir -p logs
+echo -e "${GREEN}✓ logs/ directory ready${NC}"
+
+# ── Start infrastructure ───────────────────────────────────────────────────────
+echo -e "${YELLOW}Starting infrastructure services (Kafka, Redis, PostgreSQL…)${NC}"
 cd infrastructure/docker
-docker-compose up -d
+$DOCKER_COMPOSE up -d
 
-echo -e "${GREEN}Waiting for services to be healthy...${NC}"
-sleep 30
+echo -e "${YELLOW}Waiting 45 s for services to initialise…${NC}"
+sleep 45
 
-# Check if Kafka is ready
-echo -e "${YELLOW}Checking Kafka readiness...${NC}"
-until docker exec kafka kafka-broker-api-versions --bootstrap-server localhost:9092 > /dev/null 2>&1; do
-  echo "Waiting for Kafka..."
+# ── Wait for Kafka specifically ────────────────────────────────────────────────
+echo -e "${YELLOW}Waiting for Kafka broker…${NC}"
+for i in $(seq 1 12); do
+  if docker exec kafka kafka-broker-api-versions --bootstrap-server localhost:9092 >/dev/null 2>&1; then
+    echo -e "${GREEN}✓ Kafka is ready${NC}"
+    break
+  fi
+  [ $i -eq 12 ] && { echo -e "${RED}✗ Kafka failed to start after 60 s. Check 'docker logs kafka'.${NC}"; exit 1; }
+  echo "  Still waiting… ($((i * 5))s)"
   sleep 5
 done
-echo -e "${GREEN}✓ Kafka is ready${NC}"
 
-# Create Kafka topics
-echo -e "${YELLOW}Creating Kafka topics...${NC}"
-docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic events.raw --partitions 10 --replication-factor 1
-docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic events.user --partitions 5 --replication-factor 1
-docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic events.transaction --partitions 5 --replication-factor 1
-docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic events.analytics --partitions 5 --replication-factor 1
-docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic events.system --partitions 3 --replication-factor 1
-docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic events.critical --partitions 3 --replication-factor 1
-docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic events.dlq --partitions 1 --replication-factor 1
-echo -e "${GREEN}✓ Kafka topics created${NC}"
+# ── Create Kafka topics ────────────────────────────────────────────────────────
+echo -e "${YELLOW}Creating Kafka topics…${NC}"
+declare -A TOPICS=(
+  ["events.raw"]="10"
+  ["events.user"]="5"
+  ["events.transaction"]="5"
+  ["events.analytics"]="5"
+  ["events.system"]="3"
+  ["events.critical"]="3"
+  ["events.dlq"]="1"
+)
 
-# Build services
+for topic in "${!TOPICS[@]}"; do
+  docker exec kafka kafka-topics --create --if-not-exists \
+    --bootstrap-server localhost:9092 \
+    --topic "$topic" \
+    --partitions "${TOPICS[$topic]}" \
+    --replication-factor 1 >/dev/null 2>&1
+  echo -e "  ${GREEN}✓${NC} $topic (${TOPICS[$topic]} partitions)"
+done
+
+# ── Build service ──────────────────────────────────────────────────────────────
 cd ../..
-echo -e "${YELLOW}Building services...${NC}"
-./mvnw clean install -DskipTests
-
+echo ""
+echo -e "${YELLOW}Building event-ingestion-service…${NC}"
+cd services/event-ingestion-service
+$MVN clean package -DskipTests -q
 echo -e "${GREEN}✓ Build complete${NC}"
-echo ""
+cd ../..
 
+echo ""
 echo "=================================="
-echo -e "${GREEN}Setup Complete!${NC}"
+echo -e "${GREEN}✓ Setup complete!${NC}"
 echo "=================================="
 echo ""
-echo "Services are now running:"
-echo "  - Kafka UI:        http://localhost:8082"
-echo "  - Prometheus:      http://localhost:9090"
-echo "  - Grafana:         http://localhost:3001 (admin/admin)"
-echo "  - Jaeger:          http://localhost:16686"
-echo "  - PostgreSQL:      localhost:5432"
-echo "  - Redis:           localhost:6379"
-echo "  - MongoDB:         localhost:27017"
-echo "  - Elasticsearch:   http://localhost:9200"
-echo ""
-echo "To start the services:"
-echo "  ./scripts/start-services.sh"
-echo ""
-echo "To send test events:"
-echo "  ./scripts/send-test-events.sh"
+echo "Next steps:"
+echo "  ./scripts/start-all.sh     — start the platform"
+echo "  ./scripts/send-test-events.sh — send demo events"
 echo ""

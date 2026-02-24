@@ -4,8 +4,6 @@ import com.platform.ingestion.model.Event;
 import com.platform.ingestion.service.EventIngestionService;
 import com.platform.ingestion.validation.EventValidator;
 import io.micrometer.core.annotation.Timed;
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -20,10 +18,21 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
- * REST Controller for event ingestion.
- * Supports both synchronous and asynchronous (reactive) endpoints.
+ * REST controller for event ingestion.
+ *
+ * Endpoint summary:
+ *
+ *   POST   /api/v1/events            — ingest a single event
+ *   POST   /api/v1/events/batch      — ingest up to 1 000 events
+ *   POST   /api/v1/events/stream     — reactive NDJSON stream ingestion
+ *   GET    /api/v1/events/stats      — current statistics (polled by dashboard)
+ *   GET    /api/v1/events/stats/stream — SSE stream of statistics (5 s interval)
+ *   GET    /api/v1/events/health     — service health (Kafka + Redis)
+ *
+ * Error responses are handled uniformly by GlobalExceptionHandler.
  */
 @RestController
 @RequestMapping("/api/v1/events")
@@ -33,143 +42,124 @@ public class EventController {
 
     private final EventIngestionService ingestionService;
     private final EventValidator eventValidator;
-    private final MeterRegistry meterRegistry;
 
-    /**
-     * Ingest a single event (synchronous)
-     */
+    // ── Single event ──────────────────────────────────────────────────────────
+
     @PostMapping
-    @Timed(value = "event.ingestion.single", description = "Time taken to ingest a single event")
-    public ResponseEntity<Map<String, String>> ingestEvent(@Valid @RequestBody Event event) {
-        log.info("Received event: type={}, userId={}, eventId={}", 
-                 event.eventType(), event.userId(), event.eventId());
+    @Timed(value = "eventflow.api.ingest.single", description = "Single event ingestion latency")
+    public ResponseEntity<Map<String, Object>> ingestEvent(@Valid @RequestBody Event event) {
+        String correlationId = event.correlationId() != null
+                ? event.correlationId()
+                : UUID.randomUUID().toString();
 
-        // Validate event
-        var validationResult = eventValidator.validate(event);
-        if (!validationResult.isValid()) {
-            log.warn("Event validation failed: eventId={}, errors={}", 
-                     event.eventId(), validationResult.getErrors());
-            incrementCounter("events.validation.failed", event.eventType());
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", "Validation failed", 
-                                 "details", String.join(", ", validationResult.getErrors())));
+        log.info("Ingest request: type={}, userId={}, correlationId={}",
+                event.eventType(), event.userId(), correlationId);
+
+        var validation = eventValidator.validate(event);
+        if (!validation.isValid()) {
+            log.warn("Validation failed: correlationId={}, errors={}", correlationId, validation.getErrors());
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error",         "Validation failed",
+                    "details",       validation.getErrors(),
+                    "correlationId", correlationId
+            ));
         }
 
-        // Ingest event
-        try {
-            ingestionService.ingest(event);
-            incrementCounter("events.ingested.success", event.eventType());
-            
-            return ResponseEntity.accepted()
-                    .body(Map.of(
-                            "eventId", event.eventId(),
-                            "status", "accepted",
-                            "message", "Event queued for processing"
-                    ));
-        } catch (Exception e) {
-            log.error("Failed to ingest event: eventId={}", event.eventId(), e);
-            incrementCounter("events.ingested.failed", event.eventType());
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Internal error", "message", e.getMessage()));
-        }
+        ingestionService.ingest(event);
+
+        return ResponseEntity.accepted()
+                .header("X-Correlation-Id", correlationId)
+                .body(Map.of(
+                        "eventId",       event.eventId(),
+                        "status",        "accepted",
+                        "message",       "Event queued for processing",
+                        "correlationId", correlationId
+                ));
     }
 
-    /**
-     * Batch ingest multiple events (synchronous)
-     */
+    // ── Batch ─────────────────────────────────────────────────────────────────
+
     @PostMapping("/batch")
-    @Timed(value = "event.ingestion.batch", description = "Time taken to ingest batch of events")
+    @Timed(value = "eventflow.api.ingest.batch", description = "Batch event ingestion latency")
     public ResponseEntity<Map<String, Object>> ingestBatch(@RequestBody List<@Valid Event> events) {
-        log.info("Received batch of {} events", events.size());
+        log.info("Batch ingest request: count={}", events.size());
 
-        if (events.size() > 1000) {
-            return ResponseEntity.badRequest()
-                    .body(Map.of("error", "Batch too large", "maxSize", 1000));
+        int maxBatch = 1000;
+        if (events.size() > maxBatch) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "error",   "Batch too large",
+                    "maxSize", maxBatch,
+                    "received", events.size()
+            ));
         }
 
-        try {
-            var results = ingestionService.ingestBatch(events);
-            
-            return ResponseEntity.accepted()
-                    .body(Map.of(
-                            "totalEvents", events.size(),
-                            "successCount", results.successCount(),
-                            "failureCount", results.failureCount(),
-                            "status", "accepted"
-                    ));
-        } catch (Exception e) {
-            log.error("Failed to ingest batch", e);
-            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                    .body(Map.of("error", "Internal error", "message", e.getMessage()));
-        }
+        var results = ingestionService.ingestBatch(events);
+
+        return ResponseEntity.accepted().body(Map.of(
+                "totalEvents",   events.size(),
+                "successCount",  results.successCount(),
+                "failureCount",  results.failureCount(),
+                "failedEventIds", results.failedEventIds(),
+                "status",        "accepted"
+        ));
     }
 
-    /**
-     * Reactive endpoint for streaming events (asynchronous)
-     */
+    // ── Reactive stream ingestion (NDJSON) ────────────────────────────────────
+
     @PostMapping(value = "/stream", consumes = MediaType.APPLICATION_NDJSON_VALUE)
-    public Mono<ResponseEntity<Map<String, Object>>> ingestStream(
-            @RequestBody Flux<Event> eventStream) {
-        
+    public Mono<ResponseEntity<Map<String, Object>>> ingestStream(@RequestBody Flux<Event> eventStream) {
         return eventStream
-                .flatMap(event -> {
-                    var validationResult = eventValidator.validate(event);
-                    if (validationResult.isValid()) {
-                        return Mono.fromCallable(() -> {
-                            ingestionService.ingest(event);
-                            return event;
-                        });
-                    } else {
-                        log.warn("Skipping invalid event: {}", event.eventId());
-                        return Mono.empty();
-                    }
-                })
+                .filter(event -> eventValidator.validate(event).isValid())
+                .flatMap(event -> Mono.fromRunnable(() -> ingestionService.ingest(event)))
                 .count()
                 .map(count -> ResponseEntity.accepted()
-                        .body(Map.of("processedEvents", count, "status", "completed")));
+                        .<Map<String, Object>>body(Map.of(
+                                "processedEvents", count,
+                                "status",          "completed"
+                        )));
     }
 
-    /**
-     * Server-Sent Events endpoint for real-time event statistics
-     */
-    @GetMapping(value = "/stats/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<ServerSentEvent<Map<String, Object>>> streamStats() {
-        return Flux.interval(Duration.ofSeconds(5))
-                .map(seq -> {
-                    var stats = ingestionService.getStatistics();
-                    return ServerSentEvent.<Map<String, Object>>builder()
-                            .id(String.valueOf(seq))
-                            .event("stats")
-                            .data(stats)
-                            .build();
-                });
-    }
+    // ── Statistics (REST poll) ────────────────────────────────────────────────
 
     /**
-     * Health check endpoint for event ingestion
-     */
-    @GetMapping("/health")
-    public ResponseEntity<Map<String, Object>> health() {
-        var health = ingestionService.healthCheck();
-        var status = health.get("status").equals("UP") ? HttpStatus.OK : HttpStatus.SERVICE_UNAVAILABLE;
-        return ResponseEntity.status(status).body(health);
-    }
-
-    /**
-     * Get current statistics
+     * Returns the full stats map consumed by the React dashboard's polling loop.
+     * Shape matches the TypeScript EventStats interface exactly.
      */
     @GetMapping("/stats")
     public ResponseEntity<Map<String, Object>> getStats() {
-        return ResponseEntity.ok(ingestionService.getStatistics());
+        return ResponseEntity.ok()
+                .header("Cache-Control", "no-cache, no-store, must-revalidate")
+                .body(ingestionService.getStatistics());
     }
 
+    // ── Statistics (SSE stream) ───────────────────────────────────────────────
+
     /**
-     * Helper method to increment Prometheus counters
+     * Server-Sent Events endpoint. The dashboard can subscribe here to receive
+     * live stats pushes every 2.5 s without polling.
+     *
+     * EventSource usage in the React app:
+     *   const es = new EventSource('http://localhost:8081/api/v1/events/stats/stream');
+     *   es.addEventListener('stats', e => setStats(JSON.parse(e.data)));
      */
-    private void incrementCounter(String counterName, String eventType) {
-        Counter.builder(counterName)
-                .tag("eventType", eventType)
-                .register(meterRegistry)
-                .increment();
+    @GetMapping(value = "/stats/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public Flux<ServerSentEvent<Map<String, Object>>> streamStats() {
+        return Flux.interval(Duration.ofMillis(2500))
+                .map(seq -> ServerSentEvent.<Map<String, Object>>builder()
+                        .id(String.valueOf(seq))
+                        .event("stats")
+                        .data(ingestionService.getStatistics())
+                        .build());
+    }
+
+    // ── Health ────────────────────────────────────────────────────────────────
+
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, Object>> health() {
+        var health = ingestionService.healthCheck();
+        HttpStatus status = "UP".equals(health.get("status"))
+                ? HttpStatus.OK
+                : HttpStatus.SERVICE_UNAVAILABLE;
+        return ResponseEntity.status(status).body(health);
     }
 }

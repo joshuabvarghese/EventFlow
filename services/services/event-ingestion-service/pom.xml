@@ -14,14 +14,17 @@
 
     <artifactId>event-ingestion-service</artifactId>
     <packaging>jar</packaging>
+    <!-- Fixed: was <n> (typo), now <name> -->
     <name>Event Ingestion Service</name>
+    <description>High-throughput event ingestion with Kafka, Redis deduplication, and Prometheus metrics</description>
 
     <dependencies>
-        <!-- Spring Boot -->
+        <!-- Spring Boot Web (MVC) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!-- Spring WebFlux for reactive SSE and stream endpoints -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
@@ -41,13 +44,16 @@
             <artifactId>spring-kafka</artifactId>
         </dependency>
 
-        <!-- Observability -->
+        <!-- Observability: Prometheus -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
-        
-        <!-- Micrometer Tracing (replacement for Sleuth) -->
+
+        <!--
+          Distributed tracing (Spring Boot 3 / Micrometer Tracing).
+          Replaces spring-cloud-starter-sleuth which was removed in Spring Boot 3.
+        -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-tracing-bridge-brave</artifactId>
@@ -57,7 +63,7 @@
             <artifactId>zipkin-reporter-brave</artifactId>
         </dependency>
 
-        <!-- Redis for deduplication -->
+        <!-- Redis (deduplication + pub/sub) -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
@@ -67,14 +73,11 @@
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
+            <optional>true</optional>
         </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.apache.avro</groupId>
-            <artifactId>avro</artifactId>
         </dependency>
 
         <!-- Testing -->
@@ -100,6 +103,14 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <excludes>
+                        <exclude>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                        </exclude>
+                    </excludes>
+                </configuration>
             </plugin>
         </plugins>
     </build>
