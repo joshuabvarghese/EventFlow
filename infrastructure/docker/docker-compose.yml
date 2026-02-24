@@ -8,7 +8,6 @@ version: '3.8'
 #   docker compose ps             → check status
 #   docker compose down           → stop (keeps volumes)
 #   docker compose down -v        → stop and delete all data
-
 services:
 
   # ── Kafka (via Zookeeper) ────────────────────────────────────────────────────
@@ -27,11 +26,13 @@ services:
       - zookeeper-logs:/var/lib/zookeeper/log
     networks:
       - platform-network
+    # Use zookeeper-shell (built into Confluent image) instead of nc which is not installed
     healthcheck:
-      test: echo ruok | nc localhost 2181 | grep imok
+      test: ["CMD", "bash", "-c", "echo ruok | /usr/bin/zookeeper-shell localhost:2181 2>/dev/null | grep -q imok || exit 1"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 10
+      start_period: 30s
 
   kafka:
     image: confluentinc/cp-kafka:7.6.0
@@ -58,11 +59,11 @@ services:
     networks:
       - platform-network
     healthcheck:
-      test: kafka-broker-api-versions --bootstrap-server localhost:9092
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 10
-      start_period: 30s
+      start_period: 60s
 
   kafka-ui:
     image: provectuslabs/kafka-ui:latest
@@ -155,7 +156,7 @@ services:
     networks:
       - platform-network
     healthcheck:
-      test: curl -sf http://localhost:9200/_cluster/health || exit 1
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -178,12 +179,11 @@ services:
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     extra_hosts:
-      # Allows Prometheus to reach the Java service running on the host machine
       - "host.docker.internal:host-gateway"
     networks:
       - platform-network
     healthcheck:
-      test: wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -200,7 +200,6 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_INSTALL_PLUGINS=grafana-piechart-panel
     volumes:
-      # Paths are relative to project root (two levels up from infrastructure/docker)
       - ../../monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
       - ../../monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
       - grafana-data:/var/lib/grafana
