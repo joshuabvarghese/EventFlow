@@ -1,7 +1,4 @@
 #!/bin/bash
-
-set -e
-
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
@@ -22,10 +19,11 @@ fail() { echo -e "${RED}✗ $1${NC}"; exit 1; }
 command -v java   >/dev/null 2>&1 || fail "Java 17+ required. Install from https://adoptium.net"
 command -v docker >/dev/null 2>&1 || fail "Docker required. Install from https://docker.com"
 
+# Fixed: Use array for command to bypass Zsh word-splitting limits
 if docker compose version >/dev/null 2>&1; then
-  DOCKER_COMPOSE="docker compose"
+  DOCKER_COMPOSE=(docker compose)
 elif command -v docker-compose >/dev/null 2>&1; then
-  DOCKER_COMPOSE="docker-compose"
+  DOCKER_COMPOSE=(docker-compose)
 else
   fail "Docker Compose required."
 fi
@@ -38,7 +36,7 @@ else
   fail "Maven (or ./mvnw) required."
 fi
 
-echo -e "${GREEN}✓ Prerequisites OK (Docker Compose: $DOCKER_COMPOSE, Maven: $MVN)${NC}"
+echo -e "${GREEN}✓ Prerequisites OK${NC}"
 echo ""
 
 # ── Ensure logs directory exists ───────────────────────────────────────────────
@@ -47,35 +45,45 @@ mkdir -p logs
 # ── Infrastructure ─────────────────────────────────────────────────────────────
 echo -e "${BLUE}[2/6]${NC} Starting infrastructure (Kafka, PostgreSQL, Redis, Elasticsearch…)"
 cd infrastructure/docker
-$DOCKER_COMPOSE up -d
+"${DOCKER_COMPOSE[@]}" up -d
 cd ../..
 
-echo -e "${YELLOW}  Waiting 60 s for services to be healthy…${NC}"
-sleep 60
+echo -e "${YELLOW}  Waiting 15 s for services to spin up…${NC}"
+sleep 15
 echo -e "${GREEN}✓ Infrastructure started${NC}"
 echo ""
 
 # ── Kafka topics ───────────────────────────────────────────────────────────────
 echo -e "${BLUE}[3/6]${NC} Creating Kafka topics…"
 
-declare -A TOPICS=(
-  ["events.raw"]="10"
-  ["events.user"]="5"
-  ["events.transaction"]="5"
-  ["events.analytics"]="5"
-  ["events.system"]="3"
-  ["events.critical"]="3"
-  ["events.dlq"]="1"
-)
-
-for topic in "${!TOPICS[@]}"; do
-  docker exec kafka kafka-topics --create --if-not-exists \
-    --bootstrap-server localhost:9092 \
-    --topic "$topic" \
-    --partitions "${TOPICS[$topic]}" \
-    --replication-factor 1 >/dev/null 2>&1 || true
-  echo -e "  ${GREEN}✓${NC} $topic"
-done
+# Fixed: Fallback to standard flat index arrays if the shell is old and doesn't do associative arrays
+if [ -n "$BASH_VERSION" ] && [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  TOPICS_NAMES=("events.raw" "events.user" "events.transaction" "events.analytics" "events.system" "events.critical" "events.dlq")
+  TOPICS_PARTITIONS=("10" "5" "5" "5" "3" "3" "1")
+  
+  for i in "${!TOPICS_NAMES[@]}"; do
+    topic="${TOPICS_NAMES[$i]}"
+    partitions="${TOPICS_PARTITIONS[$i]}"
+    docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic "$topic" --partitions "$partitions" --replication-factor 1 >/dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓${NC} $topic ($partitions partitions)"
+  done
+else
+  # Zsh or Bash 4+ handles this natively
+  unset TOPICS
+  declare -A TOPICS=(
+    ["events.raw"]="10"
+    ["events.user"]="5"
+    ["events.transaction"]="5"
+    ["events.analytics"]="5"
+    ["events.system"]="3"
+    ["events.critical"]="3"
+    ["events.dlq"]="1"
+  )
+  for topic in "${!TOPICS[@]}"; do
+    docker exec kafka kafka-topics --create --if-not-exists --bootstrap-server localhost:9092 --topic "$topic" --partitions "${TOPICS[$topic]}" --replication-factor 1 >/dev/null 2>&1 || true
+    echo -e "  ${GREEN}✓${NC} $topic (${TOPICS[$topic]} partitions)"
+  done
+fi
 echo ""
 
 # ── Build ──────────────────────────────────────────────────────────────────────
@@ -145,14 +153,8 @@ echo -e "${GREEN}Endpoints:${NC}"
 echo "  API:           http://localhost:8081/api/v1/events"
 echo "  Stats:         http://localhost:8081/api/v1/events/stats"
 echo "  Health:        http://localhost:8081/api/v1/events/health"
-echo "  Prometheus:    http://localhost:8081/actuator/prometheus"
-echo "  Kafka UI:      http://localhost:8082"
-echo "  Grafana:       http://localhost:3001  (admin / admin)"
+echo "  Prometheus:    http://localhost:8082/actuator/prometheus"
+echo "  Kafka UI:      http://localhost:8080"
+echo "  Grafana:       http://localhost:3000"
 echo "  Jaeger:        http://localhost:16686"
-echo ""
-echo -e "${GREEN}Quick commands:${NC}"
-echo "  ./scripts/send-test-events.sh          # send 100 demo events"
-echo "  curl http://localhost:8081/api/v1/events/stats | jq"
-echo "  tail -f logs/event-ingestion.log"
-echo "  ./scripts/stop-all.sh"
 echo ""
