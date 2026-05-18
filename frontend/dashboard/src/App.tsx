@@ -1,5 +1,5 @@
 import { Activity, AlertTriangle, CheckCircle2, Clock, Database, TrendingUp, Zap } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Area, AreaChart, Bar, BarChart, CartesianGrid,
   Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis
@@ -43,16 +43,11 @@ const CustomTooltip = ({ active, payload, label, color }: any) => {
 
 function App() {
   const [stats, setStats] = useState<EventStats>({
-    totalReceived: 847_293,
-    totalProcessed: 845_801,
-    totalFailed: 312,
-    successRate: 99.72,
-    eventsByType: {
-      'analytics.page_view': 124_000,
-      'user.login': 62_400,
-      'transaction.created': 28_100,
-      'user.signup': 14_900,
-    }
+    totalReceived: 0,
+    totalProcessed: 0,
+    totalFailed: 0,
+    successRate: 100,
+    eventsByType: {},
   });
 
   const [timeSeriesData, setTimeSeriesData] = useState<TimeSeriesData[]>([]);
@@ -60,48 +55,68 @@ function App() {
   const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
   const [activeTab, setActiveTab] = useState('Overview');
 
+  // Track previous totalProcessed to derive per-tick throughput for the chart
+  const prevProcessed = useRef<number | null>(null);
+
   useEffect(() => {
-    // Seed initial data
-    const initial: TimeSeriesData[] = Array.from({ length: 18 }, (_, i) => {
-      const d = new Date();
-      d.setSeconds(d.getSeconds() - (18 - i) * 2);
-      return {
-        timestamp: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        events: Math.floor(Math.random() * 800) + 5200,
-        latency: Math.floor(Math.random() * 30) + 55,
-      };
+    // ── Seed the time-series with an initial REST fetch ──────────────────────
+    const seedTimeSeries = async () => {
+      try {
+        const res = await fetch('/api/v1/events/stats');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data: EventStats = await res.json();
+        const now = new Date();
+        setStats(data);
+        prevProcessed.current = data.totalProcessed;
+        // Fill the chart with the first real data point; the rest will accumulate
+        setTimeSeriesData([{
+          timestamp: now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          events: data.totalProcessed,
+          latency: 0,   // latency percentiles aren't in the stats endpoint yet
+        }]);
+      } catch (err) {
+        console.warn('Initial stats fetch failed, waiting for SSE:', err);
+      }
+    };
+    seedTimeSeries();
+
+    // ── Subscribe to the SSE stream (/api/v1/events/stats/stream) ────────────
+    // The backend pushes a "stats" event every 2.5 s — exactly what we need.
+    const es = new EventSource('/api/v1/events/stats/stream');
+
+    es.addEventListener('stats', (e: MessageEvent) => {
+      try {
+        const data: EventStats = JSON.parse(e.data);
+        setStats(data);
+        setLastUpdate(new Date());
+        setIsConnected(true);
+
+        setTimeSeriesData(prev => {
+          // Derive events-per-tick from the delta in totalProcessed
+          const processed = data.totalProcessed;
+          const delta = prevProcessed.current !== null
+            ? Math.max(0, processed - prevProcessed.current)
+            : processed;
+          prevProcessed.current = processed;
+
+          const point: TimeSeriesData = {
+            timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+            events: delta,
+            latency: 0,   // extend here once the backend exposes latency percentiles
+          };
+          return [...prev, point].slice(-20);
+        });
+      } catch (err) {
+        console.error('Failed to parse stats SSE payload:', err);
+      }
     });
-    setTimeSeriesData(initial);
-    setIsConnected(true);
 
-    const interval = setInterval(() => {
-      const baseReceived = 847_293 + Math.floor(Math.random() * 12000);
-      const newStat: EventStats = {
-        totalReceived: baseReceived,
-        totalProcessed: baseReceived - Math.floor(Math.random() * 400) - 200,
-        totalFailed: Math.floor(Math.random() * 200) + 250,
-        successRate: 99.4 + Math.random() * 0.55,
-        eventsByType: {
-          'analytics.page_view': Math.floor(Math.random() * 20000) + 114000,
-          'user.login': Math.floor(Math.random() * 8000) + 58000,
-          'transaction.created': Math.floor(Math.random() * 5000) + 25500,
-          'user.signup': Math.floor(Math.random() * 2000) + 13800,
-        }
-      };
-      setStats(newStat);
-      setLastUpdate(new Date());
+    es.onerror = () => {
+      setIsConnected(false);
+      // EventSource will auto-reconnect; no manual retry needed
+    };
 
-      setTimeSeriesData(prev => {
-        const next = [...prev, {
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          events: Math.floor(Math.random() * 800) + 5200,
-          latency: Math.floor(Math.random() * 30) + 55,
-        }];
-        return next.slice(-20);
-      });
-    }, 2500);
-
-    return () => clearInterval(interval);
+    return () => es.close();
   }, []);
 
   const eventTypeData = Object.entries(stats.eventsByType).map(([name, value]) => ({
