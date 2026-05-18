@@ -7,13 +7,9 @@ import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.core.ProducerFactory;
 
 /**
- * Kafka configuration.
- *
- * Producer settings (acks, retries, idempotence, compression, etc.) are declared
- * in application.yml under spring.kafka.producer so they can be overridden per
- * environment without code changes. This class only provides the typed KafkaTemplate
- * bean — eliminating the duplication that existed between ProducerConfig constants
- * and the YAML properties.
+ * Provides a typed KafkaTemplate bean.
+ * All producer tuning (acks, retries, idempotence, compression) lives in
+ * application.yml under spring.kafka.producer so it can be overridden per env.
  */
 @Configuration
 public class KafkaConfig {

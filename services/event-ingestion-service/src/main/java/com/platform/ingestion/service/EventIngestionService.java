@@ -12,80 +12,75 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
 
 /**
  * Core event ingestion service.
  *
- * Responsibilities:
- *   - Deduplication via Redis (24-hour TTL sliding window)
- *   - Topic routing by event category / criticality
- *   - Publishing to Kafka via EventProducer
- *   - Updating Prometheus counters registered in MetricsConfig
- *   - Providing stats shaped to match the React dashboard's EventStats interface
+ * Pipeline: deduplication → topic routing → Kafka publish → metrics update.
+ *
+ * Design decisions:
+ *  - ingest() returns boolean and never throws. Failures go to DLQ; the caller
+ *    (controller / batch loop) always gets a result and can continue.
+ *  - All AtomicLong counters are injected from MetricsConfig so the same
+ *    instances back both the JSON stats API and the Prometheus Gauges.
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class EventIngestionService {
 
-    private final EventProducer eventProducer;
-    private final RedisTemplate<String, String> redisTemplate;
+    private final EventProducer                  eventProducer;
+    private final RedisTemplate<String, String>  redisTemplate;
 
-    // Injected from MetricsConfig — shared AtomicLongs drive both in-memory
-    // stats API and Prometheus Gauge metrics from a single source of truth.
+    // Shared with MetricsConfig Gauge beans
     private final AtomicLong totalEventsReceived;
     private final AtomicLong totalEventsProcessed;
     private final AtomicLong totalEventsFailed;
     private final AtomicLong totalEventsDuplicated;
 
-    // Prometheus counters / timers
+    // Prometheus instruments
     private final Counter eventsIngestedCounter;
     private final Counter eventsFailedCounter;
     private final Counter eventsDuplicatesCounter;
-    private final Timer ingestionTimer;
+    private final Timer   ingestionTimer;
 
-    // Per-type breakdown — returned as eventsByType in the stats response
+    // Per-type breakdown for the stats API
     private final Map<String, AtomicLong> eventTypeCounters = new ConcurrentHashMap<>();
 
-    // Service start time for uptime calculation
     private final Instant startTime = Instant.now();
 
-    private static final String DEDUP_KEY_PREFIX = "eventflow:dedup:";
-    private static final Duration DEDUP_TTL = Duration.ofHours(24);
+    private static final String   DEDUP_PREFIX = "eventflow:dedup:";
+    private static final Duration DEDUP_TTL    = Duration.ofHours(24);
 
     // ── Public API ────────────────────────────────────────────────────────────
 
     /**
-     * Ingest a single event: dedup → route → publish → metrics.
+     * Ingests a single event.
      *
-     * Failures are handled by sending to the DLQ and incrementing the failed
-     * counter. The exception is NOT re-thrown — a single bad event must not
-     * crash the batch loop or the HTTP request for the caller. Callers that
-     * need to distinguish success from failure should check the return value.
-     *
-     * @return true if the event was successfully published to Kafka, false otherwise
+     * @return true  — event accepted and published to Kafka
+     *         false — duplicate (skipped) or Kafka error (sent to DLQ)
      */
     public boolean ingest(Event event) {
         totalEventsReceived.incrementAndGet();
 
-        return ingestionTimer.record(() -> {
+        Boolean result = ingestionTimer.record(() -> {
             try {
                 if (isDuplicate(event)) {
-                    log.info("Duplicate event skipped: eventId={}", event.eventId());
+                    log.info("Duplicate skipped: eventId={}", event.eventId());
                     totalEventsDuplicated.incrementAndGet();
                     eventsDuplicatesCounter.increment();
-                    return false;
+                    return Boolean.FALSE;
                 }
 
                 markAsSeen(event);
 
-                String topic = determineTopicForEvent(event);
+                String topic = topicFor(event);
                 eventProducer.send(topic, event.userId(), event);
 
                 totalEventsProcessed.incrementAndGet();
@@ -94,112 +89,112 @@ public class EventIngestionService {
                         .computeIfAbsent(event.eventType(), k -> new AtomicLong(0))
                         .incrementAndGet();
 
-                log.debug("Event ingested: eventId={}, type={}, topic={}",
+                log.debug("Ingested: eventId={}, type={}, topic={}",
                         event.eventId(), event.eventType(), topic);
-                return true;
+                return Boolean.TRUE;
 
             } catch (Exception e) {
                 totalEventsFailed.incrementAndGet();
                 eventsFailedCounter.increment();
-                log.error("Failed to ingest event: eventId={}", event.eventId(), e);
-                sendToDeadLetterQueue(event, e);
-                // Do not re-throw — the event is in the DLQ; let the caller continue.
-                return false;
+                log.error("Ingestion failed: eventId={}", event.eventId(), e);
+                sendToDlq(event, e);
+                return Boolean.FALSE;
             }
         });
+
+        return Boolean.TRUE.equals(result);
     }
 
     /**
-     * Ingest a batch, collecting per-event results.
-     * Each event is processed independently — a failure on one does not
-     * abort the rest. ingest() never throws, so the loop always completes.
+     * Ingests a batch of events. Each event is processed independently;
+     * a failure on one never aborts the rest.
      */
     public BatchResult ingestBatch(List<Event> events) {
         int successCount = 0;
         int failureCount = 0;
-        List<String> failedEventIds = new ArrayList<>();
+        List<String> failedIds = new ArrayList<>();
 
         for (Event event : events) {
-            boolean ok = ingest(event);
-            if (ok) {
+            if (ingest(event)) {
                 successCount++;
             } else {
                 failureCount++;
-                failedEventIds.add(event.eventId());
+                failedIds.add(event.eventId());
             }
         }
 
-        return new BatchResult(successCount, failureCount, failedEventIds);
+        return new BatchResult(successCount, failureCount, failedIds);
     }
 
     /**
-     * Returns stats shaped to match the React dashboard's EventStats interface:
+     * Returns a stats snapshot matching the React dashboard's EventStats interface:
      * <pre>
      * {
-     *   totalReceived:  number,
-     *   totalProcessed: number,
-     *   totalFailed:    number,
+     *   totalReceived:   number,
+     *   totalProcessed:  number,
+     *   totalFailed:     number,
      *   totalDuplicated: number,
-     *   successRate:    number,          // 0–100
-     *   eventsByType:   Record<string, number>,
-     *   uptimeSeconds:  number
+     *   successRate:     number,   // 0–100
+     *   eventsByType:    Record&lt;string, number&gt;,
+     *   uptimeSeconds:   number
      * }
      * </pre>
-     *
-     * All fields are always present (no nulls) so the frontend can read them
-     * without null-guards. eventsByType is an empty map (not null) when no
-     * events have been processed yet.
      */
     public Map<String, Object> getStatistics() {
-        Map<String, Long> byType = getEventTypeStats();
-        return Map.of(
-                "totalReceived",    totalEventsReceived.get(),
-                "totalProcessed",   totalEventsProcessed.get(),
-                "totalFailed",      totalEventsFailed.get(),
-                "totalDuplicated",  totalEventsDuplicated.get(),
-                "successRate",      calculateSuccessRate(),
-                "eventsByType",     byType.isEmpty() ? Map.of() : byType,
-                "uptimeSeconds",    Duration.between(startTime, Instant.now()).getSeconds()
-        );
+        // Build eventsByType first — ConcurrentHashMap is safe to iterate
+        Map<String, Long> byType = new HashMap<>();
+        eventTypeCounters.forEach((k, v) -> byType.put(k, v.get()));
+
+        Map<String, Object> stats = new HashMap<>();
+        stats.put("totalReceived",   totalEventsReceived.get());
+        stats.put("totalProcessed",  totalEventsProcessed.get());
+        stats.put("totalFailed",     totalEventsFailed.get());
+        stats.put("totalDuplicated", totalEventsDuplicated.get());
+        stats.put("successRate",     successRate());
+        stats.put("eventsByType",    byType);
+        stats.put("uptimeSeconds",   Duration.between(startTime, Instant.now()).getSeconds());
+        return stats;
     }
 
-    /**
-     * Health check — used by both the custom /health endpoint and Spring Actuator.
-     */
+    /** Health probe used by the /health endpoint. */
     public Map<String, Object> healthCheck() {
+        boolean kafkaOk;
+        boolean redisOk;
         try {
-            boolean kafkaHealthy = eventProducer.isHealthy();
-            boolean redisHealthy = checkRedisHealth();
-            String status = (kafkaHealthy && redisHealthy) ? "UP" : "DOWN";
-
-            return Map.of(
-                    "status",          status,
-                    "kafka",           kafkaHealthy ? "UP" : "DOWN",
-                    "redis",           redisHealthy ? "UP" : "DOWN",
-                    "eventsProcessed", totalEventsProcessed.get(),
-                    "uptime",          Duration.between(startTime, Instant.now()).toString()
-            );
+            kafkaOk = eventProducer.isHealthy();
         } catch (Exception e) {
-            return Map.of("status", "DOWN", "error", e.getMessage());
+            kafkaOk = false;
         }
+        try {
+            redisTemplate.opsForValue().get("eventflow:health");
+            redisOk = true;
+        } catch (Exception e) {
+            redisOk = false;
+        }
+
+        String status = (kafkaOk && redisOk) ? "UP" : "DOWN";
+        Map<String, Object> health = new HashMap<>();
+        health.put("status",          status);
+        health.put("kafka",           kafkaOk ? "UP" : "DOWN");
+        health.put("redis",           redisOk ? "UP" : "DOWN");
+        health.put("eventsProcessed", totalEventsProcessed.get());
+        health.put("uptime",          Duration.between(startTime, Instant.now()).toString());
+        return health;
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private boolean isDuplicate(Event event) {
-        String key = DEDUP_KEY_PREFIX + event.eventId();
-        return Boolean.TRUE.equals(redisTemplate.hasKey(key));
+        return Boolean.TRUE.equals(redisTemplate.hasKey(DEDUP_PREFIX + event.eventId()));
     }
 
     private void markAsSeen(Event event) {
-        String key = DEDUP_KEY_PREFIX + event.eventId();
-        redisTemplate.opsForValue().set(key, "1", DEDUP_TTL.toMinutes(), TimeUnit.MINUTES);
+        redisTemplate.opsForValue()
+                .set(DEDUP_PREFIX + event.eventId(), "1", DEDUP_TTL.toMinutes(), TimeUnit.MINUTES);
     }
 
-    private String determineTopicForEvent(Event event) {
-        if (event.isCritical()) {
-            return "events.critical";
-        }
+    private String topicFor(Event event) {
+        if (event.isCritical()) return "events.critical";
         return switch (event.getCategory()) {
             case "user"        -> "events.user";
             case "transaction" -> "events.transaction";
@@ -209,40 +204,26 @@ public class EventIngestionService {
         };
     }
 
-    private void sendToDeadLetterQueue(Event event, Exception error) {
+    private void sendToDlq(Event event, Exception cause) {
         try {
             eventProducer.send("events.dlq", event.eventId(), event);
-            log.info("Event sent to DLQ: eventId={}, reason={}", event.eventId(), error.getMessage());
+            log.info("Event sent to DLQ: eventId={}, reason={}", event.eventId(), cause.getMessage());
         } catch (Exception e) {
-            log.error("Failed to send event to DLQ: eventId={}", event.eventId(), e);
+            log.error("DLQ send also failed: eventId={}", event.eventId(), e);
         }
     }
 
-    private double calculateSuccessRate() {
-        long total = totalEventsReceived.get();
-        if (total == 0) return 100.0;
-        return Math.round((totalEventsProcessed.get() * 10000.0) / total) / 100.0;
-    }
-
-    private Map<String, Long> getEventTypeStats() {
-        return eventTypeCounters.entrySet().stream()
-                .collect(Collectors.toMap(Map.Entry::getKey, e -> e.getValue().get()));
-    }
-
-    private boolean checkRedisHealth() {
-        try {
-            redisTemplate.opsForValue().get("eventflow:health");
-            return true;
-        } catch (Exception e) {
-            log.error("Redis health check failed", e);
-            return false;
-        }
+    private double successRate() {
+        long received = totalEventsReceived.get();
+        if (received == 0) return 100.0;
+        return Math.round((totalEventsProcessed.get() * 10000.0) / received) / 100.0;
     }
 
     // ── Inner types ───────────────────────────────────────────────────────────
 
     public record BatchResult(int successCount, int failureCount, List<String> failedEventIds) {}
 
+    /** Kept for GlobalExceptionHandler reference — no longer thrown by ingest(). */
     public static class EventIngestionException extends RuntimeException {
         public EventIngestionException(String message, Throwable cause) {
             super(message, cause);

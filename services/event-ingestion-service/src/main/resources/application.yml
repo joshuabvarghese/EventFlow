@@ -18,13 +18,11 @@ spring:
         request.timeout.ms: 30000
         delivery.timeout.ms: 120000
         client.id: ${spring.application.name}
-        # Prevents Spring from embedding __TypeId__ headers in every Kafka message.
-        # Without this, Kafka-UI and non-Spring consumers see garbled JSON because
-        # the JsonDeserializer looks for the type header and throws when it's missing
-        # or comes from a different package path.
+        # Stops Spring embedding __TypeId__ headers in messages.
+        # Without this, Kafka-UI and non-Spring consumers see deserialization errors.
         spring.json.add.type.headers: false
 
-  # Spring Boot 3.x: spring.data.redis (not spring.redis)
+  # Spring Boot 3.x uses spring.data.redis (not spring.redis)
   data:
     redis:
       host: ${REDIS_HOST:localhost}
@@ -48,14 +46,11 @@ server:
   port: 8081
   compression:
     enabled: true
-    mime-types: application/json,application/xml,text/html,text/plain
-  http2:
-    enabled: true
+    mime-types: application/json,text/event-stream,text/plain
   tomcat:
     threads:
       max: 200
       min-spare: 10
-    connection-timeout: 20000
 
 management:
   endpoints:
@@ -66,9 +61,6 @@ management:
   endpoint:
     health:
       show-details: always
-      probes:
-        enabled: true
-  # Spring Boot 3.x prometheus export config
   prometheus:
     metrics:
       export:
@@ -76,15 +68,9 @@ management:
   metrics:
     tags:
       application: ${spring.application.name}
-      environment: ${ENVIRONMENT:local}
-  health:
-    redis:
-      enabled: true
-    kafka:
-      enabled: true
   tracing:
     sampling:
-      probability: 1.0
+      probability: 0.1
 
 logging:
   level:
@@ -92,33 +78,8 @@ logging:
     com.platform: DEBUG
     org.apache.kafka: WARN
     org.springframework.kafka: INFO
-    org.springframework.web.cors: DEBUG
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %highlight(%-5level) %cyan(%logger{36}) - %msg [correlationId=%X{correlationId}]%n"
-    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg [correlationId=%X{correlationId}]%n"
-  file:
-    name: logs/event-ingestion.log
-    max-size: 100MB
-    max-history: 30
-    total-size-cap: 1GB
 
 app:
-  kafka:
-    topics:
-      raw-events: events.raw
-      user-events: events.user
-      transaction-events: events.transaction
-      analytics-events: events.analytics
-      system-events: events.system
-      critical-events: events.critical
-      dead-letter-queue: events.dlq
-
-  ingestion:
-    max-batch-size: 1000
-    deduplication-ttl-hours: 24
-    max-event-size-mb: 1
-
-  # CORS — matches React dev server and Amplify deployment
   cors:
     allowed-origins:
       - http://localhost:3000

@@ -5,26 +5,49 @@
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <parent>
-        <groupId>com.platform</groupId>
-        <artifactId>event-flow</artifactId>
-        <version>1.0.0-SNAPSHOT</version>
-        <relativePath>../../pom.xml</relativePath>
-    </parent>
+    <!--
+      Standalone pom — no parent element.
+      The original project had a multi-module parent pom that is absent from
+      the repository, causing "Non-resolvable parent POM" at every build.
+      All dependency versions are managed here via the Spring Boot BOM import.
+    -->
 
+    <groupId>com.platform</groupId>
     <artifactId>event-ingestion-service</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
-    <!-- Fixed: was <n> (typo), now <name> -->
     <name>Event Ingestion Service</name>
     <description>High-throughput event ingestion with Kafka, Redis deduplication, and Prometheus metrics</description>
 
+    <properties>
+        <java.version>21</java.version>
+        <maven.compiler.source>21</maven.compiler.source>
+        <maven.compiler.target>21</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <spring-boot.version>3.2.5</spring-boot.version>
+        <lombok.version>1.18.30</lombok.version>
+    </properties>
+
+    <!-- Import Spring Boot BOM so child deps don't need versions -->
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
     <dependencies>
-        <!-- Spring Boot Web (MVC) -->
+        <!-- Spring Boot starters -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
-        <!-- Spring WebFlux for reactive SSE and stream endpoints -->
+        <!-- WebFlux: needed for Flux/Mono SSE stream endpoint -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-webflux</artifactId>
@@ -37,6 +60,10 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
 
         <!-- Kafka -->
         <dependency>
@@ -44,16 +71,11 @@
             <artifactId>spring-kafka</artifactId>
         </dependency>
 
-        <!-- Observability: Prometheus -->
+        <!-- Metrics -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
         </dependency>
-
-        <!--
-          Distributed tracing (Spring Boot 3 / Micrometer Tracing).
-          Replaces spring-cloud-starter-sleuth which was removed in Spring Boot 3.
-        -->
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-tracing-bridge-brave</artifactId>
@@ -63,32 +85,28 @@
             <artifactId>zipkin-reporter-brave</artifactId>
         </dependency>
 
-        <!-- Redis (deduplication + pub/sub) -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
-        </dependency>
-
-        <!-- Utilities -->
-        <!--
-          Lombok: version pinned explicitly so it matches the annotationProcessorPaths
-          entry in the compiler plugin below. Without an explicit version here,
-          Maven may resolve a different version from the BOM and the processor
-          path can silently diverge — which causes "cannot find symbol" on
-          @Slf4j / @Builder / @Getter on some JVM + macOS + external-SSD setups.
-        -->
-        <dependency>
-            <groupId>org.projectlombok</groupId>
-            <artifactId>lombok</artifactId>
-            <version>1.18.30</version>
-            <optional>true</optional>
-        </dependency>
+        <!-- Jackson -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
 
-        <!-- Testing -->
+        <!--
+          Lombok: optional=true keeps it off the runtime classpath.
+          Version pinned explicitly so it matches annotationProcessorPaths below.
+        -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Test -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
@@ -99,28 +117,15 @@
             <artifactId>spring-kafka-test</artifactId>
             <scope>test</scope>
         </dependency>
-        <dependency>
-            <groupId>org.testcontainers</groupId>
-            <artifactId>kafka</artifactId>
-            <scope>test</scope>
-        </dependency>
     </dependencies>
 
     <build>
         <plugins>
             <!--
-              maven-compiler-plugin 3.11.0+ is required for Java 21.
-
-              <parameters>true</parameters>  — preserves method parameter names at
-                runtime, required by Spring MVC for @RequestParam binding without
-                explicit name= attributes.
-
-              <annotationProcessorPaths>  — tells javac exactly which JAR to use
-                as the Lombok annotation processor. Without this block, Maven
-                sometimes picks up Lombok from the compile classpath instead of
-                running it as a proper processor, which silently breaks @Slf4j,
-                @Builder, and @Getter on some JVM / macOS / external-SSD setups.
-                The version here MUST match the <dependency> version above.
+              maven-compiler-plugin 3.11.0 with explicit annotationProcessorPaths.
+              Without this block, javac does not run Lombok as a proper annotation
+              processor on Java 21 + macOS, causing "cannot find symbol" for every
+              generated field/method (@Slf4j → log, @Builder → builder(), etc.).
             -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -134,7 +139,7 @@
                         <path>
                             <groupId>org.projectlombok</groupId>
                             <artifactId>lombok</artifactId>
-                            <version>1.18.30</version>
+                            <version>${lombok.version}</version>
                         </path>
                     </annotationProcessorPaths>
                 </configuration>
@@ -143,6 +148,7 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <version>${spring-boot.version}</version>
                 <configuration>
                     <excludes>
                         <exclude>
@@ -151,6 +157,13 @@
                         </exclude>
                     </excludes>
                 </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>repackage</goal>
+                        </goals>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

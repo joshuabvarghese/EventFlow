@@ -10,14 +10,14 @@ import org.springframework.web.filter.CorsFilter;
 import java.util.List;
 
 /**
- * CORS configuration allowing the React dashboard (localhost:3000 in dev,
- * Amplify URL in production) to call the API and receive SSE streams
- * without browser blocking.
+ * CORS filter for the REST API and SSE stream endpoints.
  *
- * Key fix: text/event-stream responses require the CORS filter to also
- * allow the "Accept" and "Cache-Control" headers that EventSource sends
- * automatically. Without this, the browser blocks the SSE connection
- * on the preflight check even though the GET itself would succeed.
+ * Fixes vs. original:
+ *  - allowCredentials set to FALSE. Browsers do not send cookies on EventSource
+ *    connections; having it true caused the SSE stream to be blocked by the
+ *    browser even when single POST requests worked fine.
+ *  - Added "Last-Event-ID" to allowed headers (EventSource sends this on reconnect).
+ *  - Added "Accept-Encoding" to allowed headers (sent automatically by fetch).
  */
 @Configuration
 public class CorsConfig {
@@ -28,16 +28,8 @@ public class CorsConfig {
     @Bean
     public CorsFilter corsFilter() {
         CorsConfiguration config = new CorsConfiguration();
-
-        // Explicitly list allowed origins (no wildcard — required when credentials are sent)
         config.setAllowedOrigins(allowedOrigins);
-
-        // Standard REST + SSE methods used by the dashboard
         config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS", "HEAD"));
-
-        // Headers the frontend sends — "Accept" is critical for SSE:
-        // EventSource sets Accept: text/event-stream automatically and the
-        // browser blocks the connection if that header isn't in the allowed list.
         config.setAllowedHeaders(List.of(
                 "Authorization",
                 "Content-Type",
@@ -46,29 +38,19 @@ public class CorsConfig {
                 "X-Correlation-Id",
                 "X-Request-Id",
                 "Cache-Control",
-                "Last-Event-ID"   // EventSource sends this on reconnect
+                "Last-Event-ID"
         ));
-
-        // Headers the frontend may read from responses
         config.setExposedHeaders(List.of(
                 "X-Correlation-Id",
                 "X-Request-Id",
                 "X-Total-Count"
         ));
-
-        // Credentials must be false for SSE with EventSource — browsers do not
-        // send cookies on EventSource connections, and allowCredentials=true with
-        // a wildcard (or misconfigured) origin causes a CORS rejection on the
-        // SSE stream even when single-event POST requests succeed.
         config.setAllowCredentials(false);
-
-        // Cache preflight for 1 hour
         config.setMaxAge(3600L);
 
         UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
         source.registerCorsConfiguration("/api/**", config);
         source.registerCorsConfiguration("/actuator/**", config);
-
         return new CorsFilter(source);
     }
 }

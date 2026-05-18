@@ -12,23 +12,29 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Event model representing any event in the system.
- * Uses Java 17 records for immutability and concise syntax.
+ * Immutable event record.
+ *
+ * Uses a Java record so all fields are final by default.
+ * @Builder + @Jacksonized lets Jackson deserialise via the Lombok-generated
+ * builder rather than needing a no-arg constructor (records don't have one).
  */
 @Builder
 @Jacksonized
 public record Event(
-        @NotBlank(message = "Event ID is required")
+
+        @NotBlank(message = "eventId is required")
         String eventId,
 
-        @NotBlank(message = "Event type is required")
+        @NotBlank(message = "eventType is required")
         String eventType,
 
-        @NotBlank(message = "User ID is required")
+        @NotBlank(message = "userId is required")
         String userId,
 
-        @NotNull(message = "Timestamp is required")
-        @JsonFormat(shape = JsonFormat.Shape.STRING, pattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", timezone = "UTC")
+        @NotNull(message = "timestamp is required")
+        @JsonFormat(shape = JsonFormat.Shape.STRING,
+                    pattern = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+                    timezone = "UTC")
         Instant timestamp,
 
         JsonNode data,
@@ -40,10 +46,9 @@ public record Event(
         String source,
 
         String version
+
 ) {
-    /**
-     * Compact constructor for validation and defaults
-     */
+    /** Compact constructor — fills in defaults for optional fields. */
     public Event {
         if (eventId == null || eventId.isBlank()) {
             eventId = UUID.randomUUID().toString();
@@ -62,9 +67,7 @@ public record Event(
         }
     }
 
-    /**
-     * Factory method for creating events
-     */
+    /** Convenience factory used in tests and internal tooling. */
     public static Event create(String eventType, String userId, JsonNode data) {
         return Event.builder()
                 .eventId(UUID.randomUUID().toString())
@@ -72,23 +75,17 @@ public record Event(
                 .userId(userId)
                 .timestamp(Instant.now())
                 .data(data)
-                .version("1.0")
-                .source("api")
                 .build();
     }
 
-    /**
-     * Check if this is a critical event that requires special handling
-     */
+    /** Critical events are routed to the high-priority Kafka topic. */
     public boolean isCritical() {
-        return eventType.startsWith("error.") ||
-               eventType.startsWith("security.") ||
-               eventType.startsWith("fraud.");
+        return eventType.startsWith("error.")
+                || eventType.startsWith("security.")
+                || eventType.startsWith("fraud.");
     }
 
-    /**
-     * Get event category from event type
-     */
+    /** Returns the dot-prefix category (e.g. "user" from "user.login"). */
     public String getCategory() {
         return eventType.split("\\.")[0];
     }

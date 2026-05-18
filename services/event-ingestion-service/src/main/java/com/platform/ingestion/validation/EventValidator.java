@@ -13,17 +13,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * Event validation against format rules and business constraints.
- *
- * Design decisions:
- *  - Event type whitelist is intentionally open (category.* wildcard) to avoid
- *    having to deploy a backend change every time a new event type is introduced
- *    in the frontend or other producers. The pattern enforces the dot-separated
- *    lowercase format; unknown-but-valid types route to events.raw.
- *  - Timestamp drift of ±24 h is checked to reject obviously stale or future-
- *    dated events while tolerating clock skew between services.
- *  - Business-rule validations (transaction must have amount, etc.) are applied
- *    only for known event types so unrecognised types aren't silently rejected.
+ * Validates an Event against format rules and business constraints.
  */
 @Component
 @Slf4j
@@ -33,32 +23,17 @@ public class EventValidator {
             Pattern.compile("^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9_]*)+$");
 
     private static final Pattern USER_ID_PATTERN =
-            Pattern.compile("^[a-zA-Z0-9_@.-]{1,128}$");
+            Pattern.compile("^[a-zA-Z0-9_@.\\-]{1,128}$");
 
-    private static final int    MAX_EVENT_SIZE_BYTES      = 1_048_576; // 1 MB
-    private static final long   MAX_TIMESTAMP_DRIFT_HOURS = 24;
+    private static final int  MAX_EVENT_SIZE_BYTES      = 1_048_576; // 1 MB
+    private static final long MAX_TIMESTAMP_DRIFT_HOURS = 24;
 
-    /**
-     * Known event types for which business-rule validation is applied.
-     * Unrecognised types that match the format pattern are accepted and
-     * routed to events.raw — avoids a deployment for every new event type.
-     */
     private static final Set<String> BUSINESS_RULE_TYPES = Set.of(
-            "user.signup",
-            "user.login",
-            "user.logout",
-            "user.profile.updated",
-            "transaction.created",
-            "transaction.completed",
-            "transaction.failed",
-            "analytics.page.view",
-            "analytics.page_view",
-            "analytics.button.click",
-            "analytics.form.submit",
-            "system.error",
-            "system.warning",
-            "fraud.detected",
-            "security.breach.attempted"
+            "user.signup", "user.login", "user.logout", "user.profile.updated",
+            "transaction.created", "transaction.completed", "transaction.failed",
+            "analytics.page.view", "analytics.page_view", "analytics.button.click",
+            "analytics.form.submit", "system.error", "system.warning",
+            "fraud.detected", "security.breach.attempted"
     );
 
     public ValidationResult validate(Event event) {
@@ -71,7 +46,6 @@ public class EventValidator {
         validateDataPayload(event, errors);
         validateEventSize(event, errors);
 
-        // Only run business rules when the event type itself is valid
         if (errors.isEmpty()) {
             validateBusinessRules(event, errors);
         }
@@ -79,7 +53,7 @@ public class EventValidator {
         return new ValidationResult(errors.isEmpty(), errors);
     }
 
-    // ── Field validators ─────────────────────────────────────────────────────
+    // ── Field validators ──────────────────────────────────────────────────────
 
     private void validateEventId(Event event, List<String> errors) {
         if (event.eventId() == null || event.eventId().isBlank()) {
@@ -93,7 +67,7 @@ public class EventValidator {
             return;
         }
         if (!EVENT_TYPE_PATTERN.matcher(event.eventType()).matches()) {
-            errors.add("eventType must be lowercase dot-separated (e.g. user.login, analytics.page.view)");
+            errors.add("eventType must be lowercase dot-separated (e.g. user.login)");
         }
     }
 
@@ -103,7 +77,7 @@ public class EventValidator {
             return;
         }
         if (!USER_ID_PATTERN.matcher(event.userId()).matches()) {
-            errors.add("userId contains invalid characters (allowed: a-z A-Z 0-9 _ @ . -)");
+            errors.add("userId contains invalid characters");
         }
     }
 
@@ -114,8 +88,7 @@ public class EventValidator {
         }
         long drift = Math.abs(ChronoUnit.HOURS.between(event.timestamp(), Instant.now()));
         if (drift > MAX_TIMESTAMP_DRIFT_HOURS) {
-            errors.add(String.format(
-                    "timestamp drift is %d hours — maximum allowed is %d hours",
+            errors.add(String.format("timestamp drift %dh exceeds maximum %dh",
                     drift, MAX_TIMESTAMP_DRIFT_HOURS));
         }
     }
@@ -131,33 +104,31 @@ public class EventValidator {
         try {
             int size = event.toString().getBytes().length;
             if (size > MAX_EVENT_SIZE_BYTES) {
-                errors.add(String.format(
-                        "event size %d bytes exceeds maximum %d bytes (1 MB)",
-                        size, MAX_EVENT_SIZE_BYTES));
+                errors.add(String.format("event size %d bytes exceeds 1 MB limit", size));
             }
         } catch (Exception e) {
-            log.warn("Unable to estimate event size for eventId={}", event.eventId());
+            log.warn("Could not estimate event size for eventId={}", event.eventId());
         }
     }
 
-    // ── Business rules ───────────────────────────────────────────────────────
+    // ── Business rules ────────────────────────────────────────────────────────
 
     private void validateBusinessRules(Event event, List<String> errors) {
         if (!BUSINESS_RULE_TYPES.contains(event.eventType())) {
-            // Unknown-but-valid type — skip business rules, route to events.raw
-            return;
+            return; // unknown-but-valid type → routed to events.raw, no business rules
         }
         switch (event.eventType()) {
-            case "user.signup"           -> requireDataFields(event, errors, "email", "source");
+            case "user.signup"                              -> requireFields(event, errors, "email", "source");
             case "transaction.created",
                  "transaction.completed",
-                 "transaction.failed"   -> requireDataFields(event, errors, "amount", "currency");
-            case "fraud.detected"        -> requireDataFields(event, errors, "riskScore", "reason");
-            case "security.breach.attempted" -> requireDataFields(event, errors, "ip", "reason");
+                 "transaction.failed"                      -> requireFields(event, errors, "amount", "currency");
+            case "fraud.detected"                          -> requireFields(event, errors, "riskScore", "reason");
+            case "security.breach.attempted"               -> requireFields(event, errors, "ip", "reason");
+            default                                        -> { /* no additional rules */ }
         }
     }
 
-    private void requireDataFields(Event event, List<String> errors, String... fields) {
+    private void requireFields(Event event, List<String> errors, String... fields) {
         JsonNode data = event.data();
         if (data == null || data.isNull()) {
             errors.add(event.eventType() + " requires a data payload");
@@ -170,32 +141,31 @@ public class EventValidator {
         }
     }
 
-    // ── Result type ──────────────────────────────────────────────────────────
+    // ── Result ────────────────────────────────────────────────────────────────
 
     /**
-     * Holds the outcome of a single validation run.
+     * Validation outcome.
      *
-     * @Getter is intentionally NOT used here. On Java 21 + Lombok 1.18.30,
-     * some annotation processor configurations mis-generate the boolean
-     * accessor as "getValid()" instead of "isValid()", which causes
-     * "cannot find symbol" in EventController. Writing both methods
-     * explicitly is the safe, compiler-independent approach.
+     * isValid() and getErrors() are written explicitly rather than using @Getter.
+     * Lombok's @Getter on a primitive boolean field named "valid" generates
+     * "isValid()" per the JavaBean spec, but some compiler + annotation processor
+     * combinations on Java 21 generate "getValid()" instead, causing
+     * "cannot find symbol" in callers. Explicit methods are unambiguous.
      */
-    public static class ValidationResult {
-        private final boolean valid;
+    public static final class ValidationResult {
+
+        private final boolean      valid;
         private final List<String> errors;
 
         public ValidationResult(boolean valid, List<String> errors) {
             this.valid  = valid;
-            this.errors = errors;
+            this.errors = List.copyOf(errors); // defensive copy
         }
 
-        /** Returns true when no validation errors were found. */
         public boolean isValid() {
             return valid;
         }
 
-        /** Returns the (possibly empty) list of error messages. */
         public List<String> getErrors() {
             return errors;
         }

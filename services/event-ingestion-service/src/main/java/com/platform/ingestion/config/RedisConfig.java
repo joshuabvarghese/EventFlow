@@ -7,15 +7,8 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 
 /**
- * Redis configuration.
- *
- * Connection settings (host, port, password, pool) are bound from
- * spring.data.redis.* in application.yml — Spring Boot auto-configures the
- * LettuceConnectionFactory automatically, so we only need to customise the
- * RedisTemplate serialisers here.
- *
- * Note: the property prefix changed from spring.redis to spring.data.redis
- * in Spring Boot 3. The old prefix is no longer recognised.
+ * Configures a String-keyed RedisTemplate used for event deduplication.
+ * Connection settings come from spring.data.redis.* in application.yml.
  */
 @Configuration
 public class RedisConfig {
@@ -25,11 +18,11 @@ public class RedisConfig {
         RedisTemplate<String, String> template = new RedisTemplate<>();
         template.setConnectionFactory(connectionFactory);
 
-        StringRedisSerializer stringSerializer = new StringRedisSerializer();
-        template.setKeySerializer(stringSerializer);
-        template.setValueSerializer(stringSerializer);
-        template.setHashKeySerializer(stringSerializer);
-        template.setHashValueSerializer(stringSerializer);
+        StringRedisSerializer ser = new StringRedisSerializer();
+        template.setKeySerializer(ser);
+        template.setValueSerializer(ser);
+        template.setHashKeySerializer(ser);
+        template.setHashValueSerializer(ser);
         template.afterPropertiesSet();
 
         return template;
