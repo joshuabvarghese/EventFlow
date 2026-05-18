@@ -63,17 +63,24 @@ public class EventIngestionService {
 
     /**
      * Ingest a single event: dedup → route → publish → metrics.
+     *
+     * Failures are handled by sending to the DLQ and incrementing the failed
+     * counter. The exception is NOT re-thrown — a single bad event must not
+     * crash the batch loop or the HTTP request for the caller. Callers that
+     * need to distinguish success from failure should check the return value.
+     *
+     * @return true if the event was successfully published to Kafka, false otherwise
      */
-    public void ingest(Event event) {
+    public boolean ingest(Event event) {
         totalEventsReceived.incrementAndGet();
 
-        ingestionTimer.record(() -> {
+        return ingestionTimer.record(() -> {
             try {
                 if (isDuplicate(event)) {
                     log.info("Duplicate event skipped: eventId={}", event.eventId());
                     totalEventsDuplicated.incrementAndGet();
                     eventsDuplicatesCounter.increment();
-                    return;
+                    return false;
                 }
 
                 markAsSeen(event);
@@ -89,19 +96,23 @@ public class EventIngestionService {
 
                 log.debug("Event ingested: eventId={}, type={}, topic={}",
                         event.eventId(), event.eventType(), topic);
+                return true;
 
             } catch (Exception e) {
                 totalEventsFailed.incrementAndGet();
                 eventsFailedCounter.increment();
                 log.error("Failed to ingest event: eventId={}", event.eventId(), e);
                 sendToDeadLetterQueue(event, e);
-                throw new EventIngestionException("Failed to process event", e);
+                // Do not re-throw — the event is in the DLQ; let the caller continue.
+                return false;
             }
         });
     }
 
     /**
      * Ingest a batch, collecting per-event results.
+     * Each event is processed independently — a failure on one does not
+     * abort the rest. ingest() never throws, so the loop always completes.
      */
     public BatchResult ingestBatch(List<Event> events) {
         int successCount = 0;
@@ -109,13 +120,12 @@ public class EventIngestionService {
         List<String> failedEventIds = new ArrayList<>();
 
         for (Event event : events) {
-            try {
-                ingest(event);
+            boolean ok = ingest(event);
+            if (ok) {
                 successCount++;
-            } catch (Exception e) {
+            } else {
                 failureCount++;
                 failedEventIds.add(event.eventId());
-                log.error("Batch: failed to ingest eventId={}", event.eventId(), e);
             }
         }
 
@@ -129,19 +139,27 @@ public class EventIngestionService {
      *   totalReceived:  number,
      *   totalProcessed: number,
      *   totalFailed:    number,
+     *   totalDuplicated: number,
      *   successRate:    number,          // 0–100
-     *   eventsByType:   Record<string, number>
+     *   eventsByType:   Record<string, number>,
+     *   uptimeSeconds:  number
      * }
      * </pre>
+     *
+     * All fields are always present (no nulls) so the frontend can read them
+     * without null-guards. eventsByType is an empty map (not null) when no
+     * events have been processed yet.
      */
     public Map<String, Object> getStatistics() {
+        Map<String, Long> byType = getEventTypeStats();
         return Map.of(
-                "totalReceived",  totalEventsReceived.get(),
-                "totalProcessed", totalEventsProcessed.get(),
-                "totalFailed",    totalEventsFailed.get(),
-                "successRate",    calculateSuccessRate(),
-                "eventsByType",   getEventTypeStats(),
-                "uptimeSeconds",  Duration.between(startTime, Instant.now()).getSeconds()
+                "totalReceived",    totalEventsReceived.get(),
+                "totalProcessed",   totalEventsProcessed.get(),
+                "totalFailed",      totalEventsFailed.get(),
+                "totalDuplicated",  totalEventsDuplicated.get(),
+                "successRate",      calculateSuccessRate(),
+                "eventsByType",     byType.isEmpty() ? Map.of() : byType,
+                "uptimeSeconds",    Duration.between(startTime, Instant.now()).getSeconds()
         );
     }
 

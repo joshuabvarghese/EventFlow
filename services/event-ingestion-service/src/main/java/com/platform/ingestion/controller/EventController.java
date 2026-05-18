@@ -65,7 +65,20 @@ public class EventController {
             ));
         }
 
-        ingestionService.ingest(event);
+        boolean accepted = ingestionService.ingest(event);
+
+        if (!accepted) {
+            // Duplicate or DLQ'd — still return 202 so the client doesn't retry
+            // infinitely, but include a status hint so the caller can log it.
+            return ResponseEntity.accepted()
+                    .header("X-Correlation-Id", correlationId)
+                    .body(Map.of(
+                            "eventId",       event.eventId(),
+                            "status",        "skipped",
+                            "message",       "Event was a duplicate or failed and was sent to DLQ",
+                            "correlationId", correlationId
+                    ));
+        }
 
         return ResponseEntity.accepted()
                 .header("X-Correlation-Id", correlationId)

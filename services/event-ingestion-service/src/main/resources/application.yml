@@ -18,6 +18,11 @@ spring:
         request.timeout.ms: 30000
         delivery.timeout.ms: 120000
         client.id: ${spring.application.name}
+        # Prevents Spring from embedding __TypeId__ headers in every Kafka message.
+        # Without this, Kafka-UI and non-Spring consumers see garbled JSON because
+        # the JsonDeserializer looks for the type header and throws when it's missing
+        # or comes from a different package path.
+        spring.json.add.type.headers: false
 
   # Spring Boot 3.x: spring.data.redis (not spring.redis)
   data:

@@ -2,7 +2,6 @@ package com.platform.ingestion.validation;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.platform.ingestion.model.Event;
-import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -173,7 +172,15 @@ public class EventValidator {
 
     // ── Result type ──────────────────────────────────────────────────────────
 
-    @Getter
+    /**
+     * Holds the outcome of a single validation run.
+     *
+     * @Getter is intentionally NOT used here. On Java 21 + Lombok 1.18.30,
+     * some annotation processor configurations mis-generate the boolean
+     * accessor as "getValid()" instead of "isValid()", which causes
+     * "cannot find symbol" in EventController. Writing both methods
+     * explicitly is the safe, compiler-independent approach.
+     */
     public static class ValidationResult {
         private final boolean valid;
         private final List<String> errors;
@@ -181,6 +188,16 @@ public class EventValidator {
         public ValidationResult(boolean valid, List<String> errors) {
             this.valid  = valid;
             this.errors = errors;
+        }
+
+        /** Returns true when no validation errors were found. */
+        public boolean isValid() {
+            return valid;
+        }
+
+        /** Returns the (possibly empty) list of error messages. */
+        public List<String> getErrors() {
+            return errors;
         }
     }
 }
