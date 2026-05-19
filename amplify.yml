@@ -4,12 +4,12 @@ frontend:
     preBuild:
       commands:
         - node --version
-        - nvm use 20 || nvm install 20
+        - nvm install 20
+        - nvm use 20
         - node --version
-        - cd frontend/dashboard && npm ci
+        - cd frontend/dashboard && npm install  # Try npm install instead of ci
     build:
       commands:
-        - nvm use 20
         - cd frontend/dashboard && npm run build
   artifacts:
     baseDirectory: frontend/dashboard/dist
