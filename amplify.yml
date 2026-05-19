@@ -7,10 +7,10 @@ frontend:
         - nvm install 20
         - nvm use 20
         - node --version
-        - cd frontend/dashboard && npm install  # Try npm install instead of ci
+        - cd frontend/dashboard && npm install 
     build:
       commands:
-        - cd frontend/dashboard && npm run build
+        - cd frontend/dashboard && npm run build 
   artifacts:
     baseDirectory: frontend/dashboard/dist
     files:
