@@ -7,6 +7,7 @@ frontend:
         - npm ci
     build:
       commands:
+        - cd frontend/dashboard
         - npm run build
   artifacts:
     baseDirectory: frontend/dashboard/dist

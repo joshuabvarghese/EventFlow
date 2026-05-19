@@ -1,418 +1,505 @@
-import { Activity, AlertTriangle, CheckCircle2, Clock, Database, TrendingUp, Zap } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { Activity, AlertTriangle, CheckCircle2, Database, Zap } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
 import {
-  Area, AreaChart, Bar, BarChart, CartesianGrid,
-  Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis
+  Area, AreaChart, Bar, BarChart,
+  CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis
 } from 'recharts';
 import './App.css';
 
+// ── Types ────────────────────────────────────────────────────────────────────
+
 interface EventStats {
-  totalReceived: number;
-  totalProcessed: number;
-  totalFailed: number;
-  successRate: number;
-  eventsByType: Record<string, number>;
+  totalReceived:   number;
+  totalProcessed:  number;
+  totalFailed:     number;
+  totalDuplicated: number;
+  successRate:     number;
+  eventsByType:    Record<string, number>;
+  uptimeSeconds:   number;
 }
 
 interface TimeSeriesData {
   timestamp: string;
-  events: number;
-  latency: number;
+  events:    number;
 }
 
-const CustomTooltip = ({ active, payload, label, color }: any) => {
-  if (active && payload && payload.length) {
-    return (
-      <div style={{
-        background: '#141923',
-        border: '1px solid rgba(255,255,255,0.1)',
-        borderRadius: 8,
-        padding: '10px 14px',
-        fontFamily: 'IBM Plex Mono, monospace',
-        fontSize: 12,
-      }}>
-        <p style={{ color: '#7d8fa8', marginBottom: 4, fontSize: 11 }}>{label}</p>
-        <p style={{ color: payload[0].value > 0 ? color : '#f87171', fontWeight: 600 }}>
-          {payload[0].value.toLocaleString()}
-        </p>
-      </div>
-    );
-  }
-  return null;
+interface LogLine {
+  id:     number;
+  time:   string;
+  type:   string;
+  userId: string;
+  status: string;
+}
+
+// ── Static config ─────────────────────────────────────────────────────────────
+
+const EVENT_TYPES = [
+  'analytics.page_view',
+  'user.login',
+  'transaction.created',
+  'user.signup',
+  'system.error',
+  'fraud.detected',
+];
+
+const INITIAL_COUNTS: Record<string, number> = {
+  'analytics.page_view':  124_000,
+  'user.login':            62_400,
+  'transaction.created':   28_100,
+  'user.signup':           14_900,
+  'system.error':           4_200,
+  'fraud.detected':           890,
 };
 
-function App() {
-  const [stats, setStats] = useState<EventStats>({
-    totalReceived: 847_293,
-    totalProcessed: 845_801,
-    totalFailed: 312,
-    successRate: 99.72,
-    eventsByType: {
-      'analytics.page_view': 124_000,
-      'user.login': 62_400,
-      'transaction.created': 28_100,
-      'user.signup': 14_900,
-    }
+const INFRA = [
+  { name: 'Apache Kafka 3.6',  role: 'Message Broker'  },
+  { name: 'Redis 7.2',         role: 'Deduplication'   },
+  { name: 'PostgreSQL 16',     role: 'Event Store'      },
+  { name: 'Prometheus',        role: 'Metrics'          },
+  { name: 'Stream Processor',  role: 'Enrichment'       },
+];
+
+const LATENCY_PERCENTILES = [
+  { label: 'P50', ms: 12  },
+  { label: 'P90', ms: 38  },
+  { label: 'P95', ms: 62  },
+  { label: 'P99', ms: 94  },
+];
+
+// ── Simulation helpers ────────────────────────────────────────────────────────
+
+function jitter(base: number, pct = 0.06): number {
+  return Math.round(base * (1 + (Math.random() - 0.5) * pct));
+}
+
+function makeInitialStats(): EventStats {
+  return {
+    totalReceived:   847_293,
+    totalProcessed:  845_801,
+    totalFailed:         312,
+    totalDuplicated:     180,
+    successRate:       99.72,
+    eventsByType:    { ...INITIAL_COUNTS },
+    uptimeSeconds:   51_720,
+  };
+}
+
+let logIdSeq = 0;
+function makeLogLine(eventsByType: Record<string, number>): LogLine {
+  const types = Object.keys(eventsByType);
+  const pool  = types.length ? types : EVENT_TYPES;
+  // Weight toward high-volume types
+  const weights = pool.map(t => eventsByType[t] ?? 1);
+  const total   = weights.reduce((a, b) => a + b, 0);
+  let r = Math.random() * total;
+  let picked = pool[0];
+  for (let i = 0; i < pool.length; i++) {
+    r -= weights[i];
+    if (r <= 0) { picked = pool[i]; break; }
+  }
+  const now = new Date();
+  return {
+    id:     ++logIdSeq,
+    time:   now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    type:   picked,
+    userId: 'u_' + Math.random().toString(36).slice(2, 9),
+    status: Math.random() > 0.02 ? 'OK' : 'ERR',
+  };
+}
+
+function seedSeries(): TimeSeriesData[] {
+  const now = Date.now();
+  return Array.from({ length: 20 }, (_, i) => {
+    const d = new Date(now - (20 - i) * 2500);
+    return {
+      timestamp: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+      events:    jitter(5_200, 0.25),
+    };
   });
+}
 
-  const [timeSeriesData, setTimeSeriesData] = useState<TimeSeriesData[]>([]);
-  const [isConnected, setIsConnected] = useState(false);
-  const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-  const [activeTab, setActiveTab] = useState('Overview');
+// ── Custom tooltip ────────────────────────────────────────────────────────────
 
+const CustomTooltip = ({ active, payload, label }: any) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{
+      background: '#1c1a17',
+      border: '1px solid rgba(255,255,255,0.08)',
+      padding: '8px 12px',
+      fontFamily: 'Geist Mono, monospace',
+      fontSize: 11,
+    }}>
+      <div style={{ color: 'rgba(255,255,255,0.35)', marginBottom: 2 }}>{label}</div>
+      <div style={{ color: '#f07030', fontWeight: 600 }}>{payload[0].value.toLocaleString()}</div>
+    </div>
+  );
+};
+
+// ── App ───────────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [stats, setStats]           = useState<EventStats>(makeInitialStats);
+  const [series, setSeries]         = useState<TimeSeriesData[]>(seedSeries);
+  const [logLines, setLogLines]     = useState<LogLine[]>([]);
+  const [activeTab, setActiveTab]   = useState('Overview');
+  const [uptimeSec, setUptimeSec]   = useState(51_720);
+  const logRef                      = useRef<HTMLDivElement>(null);
+
+  // Seed initial log lines
   useEffect(() => {
-    // Seed initial data
-    const initial: TimeSeriesData[] = Array.from({ length: 18 }, (_, i) => {
-      const d = new Date();
-      d.setSeconds(d.getSeconds() - (18 - i) * 2);
-      return {
-        timestamp: d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        events: Math.floor(Math.random() * 800) + 5200,
-        latency: Math.floor(Math.random() * 30) + 55,
-      };
-    });
-    setTimeSeriesData(initial);
-    setIsConnected(true);
+    const seed: LogLine[] = [];
+    for (let i = 0; i < 18; i++) seed.push(makeLogLine(INITIAL_COUNTS));
+    setLogLines(seed);
+  }, []);
 
+  // Main simulation tick — every 2.5 s
+  useEffect(() => {
     const interval = setInterval(() => {
-      const baseReceived = 847_293 + Math.floor(Math.random() * 12000);
-      const newStat: EventStats = {
-        totalReceived: baseReceived,
-        totalProcessed: baseReceived - Math.floor(Math.random() * 400) - 200,
-        totalFailed: Math.floor(Math.random() * 200) + 250,
-        successRate: 99.4 + Math.random() * 0.55,
-        eventsByType: {
-          'analytics.page_view': Math.floor(Math.random() * 20000) + 114000,
-          'user.login': Math.floor(Math.random() * 8000) + 58000,
-          'transaction.created': Math.floor(Math.random() * 5000) + 25500,
-          'user.signup': Math.floor(Math.random() * 2000) + 13800,
-        }
-      };
-      setStats(newStat);
-      setLastUpdate(new Date());
+      const tickEvents  = jitter(5_200, 0.30);
+      const tickFailed  = Math.random() > 0.85 ? Math.floor(Math.random() * 4) : 0;
 
-      setTimeSeriesData(prev => {
-        const next = [...prev, {
+      setStats(prev => {
+        const received  = prev.totalReceived  + tickEvents + tickFailed;
+        const processed = prev.totalProcessed + tickEvents;
+        const failed    = prev.totalFailed    + tickFailed;
+        const rate      = Math.round(((processed / received) * 10000)) / 100;
+
+        // Tick each event type count
+        const byType = { ...prev.eventsByType };
+        EVENT_TYPES.forEach(t => {
+          const base = INITIAL_COUNTS[t] ?? 100;
+          byType[t]  = (byType[t] ?? base) + jitter(Math.round(base * 0.004), 0.5);
+        });
+
+        return { ...prev, totalReceived: received, totalProcessed: processed, totalFailed: failed, successRate: rate, eventsByType: byType };
+      });
+
+      setSeries(prev => {
+        const point: TimeSeriesData = {
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-          events: Math.floor(Math.random() * 800) + 5200,
-          latency: Math.floor(Math.random() * 30) + 55,
-        }];
-        return next.slice(-20);
+          events:    tickEvents,
+        };
+        return [...prev, point].slice(-24);
+      });
+
+      // Add 1-3 log lines per tick
+      const count = Math.floor(Math.random() * 3) + 1;
+      setLogLines(prev => {
+        const next = [...prev];
+        for (let i = 0; i < count; i++) next.unshift(makeLogLine(INITIAL_COUNTS));
+        return next.slice(0, 40);
       });
     }, 2500);
 
     return () => clearInterval(interval);
   }, []);
 
-  const eventTypeData = Object.entries(stats.eventsByType).map(([name, value]) => ({
-    name: name.split('.').slice(-1)[0].replace(/_/g, ' '),
-    fullName: name,
-    value,
-  }));
+  // Uptime counter — every second
+  useEffect(() => {
+    const t = setInterval(() => setUptimeSec(s => s + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
 
-  const latencyPercentiles = [
-    { label: 'P50', value: 38, max: 100 },
-    { label: 'P90', value: 62, max: 100 },
-    { label: 'P95', value: 78, max: 100 },
-    { label: 'P99', value: 94, max: 100 },
-  ];
+  // Keep log scrolled to top
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = 0;
+  }, [logLines.length]);
 
-  const services = [
-    'Kafka Cluster',
-    'PostgreSQL',
-    'Redis Cache',
-    'Elasticsearch',
-    'Stream Processor',
-  ];
+  // Derived values
+  const totalByType = Object.values(stats.eventsByType).reduce((a, b) => a + b, 0) || 1;
+  const distData    = Object.entries(stats.eventsByType)
+    .map(([name, value]) => ({ name, short: name.split('.').pop()!.replace(/_/g, ' '), value, pct: Math.round((value / totalByType) * 100) }))
+    .sort((a, b) => b.value - a.value);
+
+  const barData = distData.slice(0, 6).map(d => ({ name: d.short, value: d.value }));
+  const maxPct  = LATENCY_PERCENTILES[LATENCY_PERCENTILES.length - 1].ms;
+  const uptimeH = Math.floor(uptimeSec / 3600);
+  const uptimeM = Math.floor((uptimeSec % 3600) / 60);
+  const lastTick = series[series.length - 1]?.events ?? 0;
+  const tabs = ['Overview', 'Events', 'Latency', 'Infrastructure'];
 
   return (
     <div className="app">
-      {/* Status Bar */}
-      <div className="status-bar">
-        <div className="status-item">
-          <div className={`status-indicator ${isConnected ? 'connected' : 'disconnected'}`} />
-          <span>System {isConnected ? 'Operational' : 'Offline'}</span>
+
+      {/* ── TICKER ─────────────────────────────────────────────────────── */}
+      <div className="ticker-bar">
+        <div className="ticker-left">
+          <span><span className="ping-dot" />STREAM CONNECTED</span>
+          <span className="t-sep" />
+          <span>SIMULATED · {new Date().toLocaleTimeString()}</span>
         </div>
-        <div className="status-item">
-          <Clock size={12} />
-          <span>Updated {lastUpdate.toLocaleTimeString()}</span>
+        <div className="ticker-right">
+          <span className="t-item">RECEIVED <strong>{stats.totalReceived.toLocaleString()}</strong></span>
+          <span className="t-sep" />
+          <span className="t-item">PROCESSED <strong>{stats.totalProcessed.toLocaleString()}</strong></span>
+          <span className="t-sep" />
+          <span className="t-item">FAILED <strong>{stats.totalFailed.toLocaleString()}</strong></span>
+          <span className="t-sep" />
+          <span className="t-item">SUCCESS <strong>{stats.successRate.toFixed(2)}%</strong></span>
         </div>
       </div>
 
-      {/* Header */}
+      {/* ── HEADER ─────────────────────────────────────────────────────── */}
       <header className="header">
-        <div className="header-content">
+        <div className="header-inner">
+
           <div className="brand">
-            <div className="logo-box">
-              <Activity size={22} strokeWidth={2} />
+            <div className="brand-mark">
+              <Activity size={17} strokeWidth={2.2} />
             </div>
-            <div className="brand-text">
-              <h1>EventFlow</h1>
-              <p className="subtitle">Distributed Stream Processing Platform</p>
-            </div>
-          </div>
-          <div className="header-stats">
-            <div className="header-stat">
-              <span className="label">Throughput</span>
-              <span className="value accent">{(stats.totalProcessed / 1000).toFixed(1)}K/s</span>
-            </div>
-            <div className="header-stat">
-              <span className="label">Success Rate</span>
-              <span className="value">{stats.successRate.toFixed(2)}%</span>
+            <div>
+              <div className="brand-name">EventFlow</div>
+              <div className="brand-sub">Stream Processing Platform</div>
             </div>
           </div>
+
+          <nav className="nav">
+            {tabs.map((t, i) => (
+              <div key={t} className={`nav-item${activeTab === t ? ' active' : ''}`} onClick={() => setActiveTab(t)}>
+                <span className="nav-num">0{i + 1}</span>{t}
+              </div>
+            ))}
+          </nav>
+
+          <div className="header-kpis">
+            <div className="kpi-cell">
+              <div className="kpi-lbl">Throughput</div>
+              <div className="kpi-val amber">
+                {lastTick.toLocaleString()}
+                <span style={{ fontSize: 10, marginLeft: 3, color: 'var(--ink-4)' }}>/tick</span>
+              </div>
+            </div>
+            <div className="kpi-cell">
+              <div className="kpi-lbl">Success Rate</div>
+              <div className="kpi-val green">{stats.successRate.toFixed(2)}%</div>
+            </div>
+            <div className="kpi-cell">
+              <div className="kpi-lbl">Uptime</div>
+              <div className="kpi-val">{uptimeH}h {uptimeM}m</div>
+            </div>
+          </div>
+
         </div>
       </header>
 
-      {/* Navigation */}
-      <nav className="nav-tabs">
-        <div className="nav-tabs-inner">
-          {['Overview', 'Events', 'Latency', 'Services'].map(tab => (
-            <div
-              key={tab}
-              className={`nav-tab ${activeTab === tab ? 'active' : ''}`}
-              onClick={() => setActiveTab(tab)}
-            >
-              {tab}
-            </div>
-          ))}
+      {/* ── MAIN ───────────────────────────────────────────────────────── */}
+      <main className="main">
+
+        {/* KPI ROW */}
+        <div className="section-head">
+          <span className="section-head-title">Key Metrics</span>
+          <div className="section-rule" />
         </div>
-      </nav>
 
-      {/* Main Content */}
-      <main className="main-content">
-        {/* KPI Row */}
-        <div className="section-label">Key Metrics</div>
-        <div className="metric-row">
-          <div className="metric-card">
-            <div className="metric-card-top">
-              <span className="metric-card-label">Total Events Received</span>
-              <div className="metric-icon blue">
-                <Database size={16} />
-              </div>
+        <div className="row-3">
+          <div className="metric-panel">
+            <div className="metric-panel-top">
+              <span className="metric-panel-label">Events Received</span>
+              <div className="metric-icon amber"><Database size={14} /></div>
             </div>
-            <div className="metric-value">{stats.totalReceived.toLocaleString()}</div>
-            <div className="metric-footer">
-              <span className="metric-badge positive">+12.5%</span>
-              <span>vs. yesterday</span>
+            <div className="metric-num">{stats.totalReceived.toLocaleString()}</div>
+            <div className="metric-foot">
+              <span className="badge up">+12.5%</span>vs yesterday
             </div>
           </div>
 
-          <div className="metric-card">
-            <div className="metric-card-top">
-              <span className="metric-card-label">Events Processed</span>
-              <div className="metric-icon green">
-                <Zap size={16} />
-              </div>
+          <div className="metric-panel">
+            <div className="metric-panel-top">
+              <span className="metric-panel-label">Events Processed</span>
+              <div className="metric-icon green"><Zap size={14} /></div>
             </div>
-            <div className="metric-value">{stats.totalProcessed.toLocaleString()}</div>
-            <div className="metric-footer">
-              <CheckCircle2 size={13} style={{ color: 'var(--success)' }} />
-              <span>Exactly-once semantics</span>
+            <div className="metric-num">{stats.totalProcessed.toLocaleString()}</div>
+            <div className="metric-foot">
+              <CheckCircle2 size={12} style={{ color: 'var(--green)', flexShrink: 0 }} />
+              Exactly-once semantics
             </div>
           </div>
 
-          <div className="metric-card">
-            <div className="metric-card-top">
-              <span className="metric-card-label">Failed Events (DLQ)</span>
-              <div className="metric-icon red">
-                <AlertTriangle size={16} />
-              </div>
+          <div className="metric-panel">
+            <div className="metric-panel-top">
+              <span className="metric-panel-label">Failed (DLQ)</span>
+              <div className="metric-icon red"><AlertTriangle size={14} /></div>
             </div>
-            <div className="metric-value">{stats.totalFailed.toLocaleString()}</div>
-            <div className="metric-footer">
-              <span className="metric-badge neutral">0.04%</span>
-              <span>of total volume</span>
+            <div className="metric-num">{stats.totalFailed.toLocaleString()}</div>
+            <div className="metric-foot">
+              <span className="badge neu">
+                {stats.totalReceived > 0
+                  ? ((stats.totalFailed / stats.totalReceived) * 100).toFixed(2)
+                  : '0.00'}%
+              </span>
+              of total volume
             </div>
           </div>
         </div>
 
-        {/* Charts Row */}
-        <div className="section-label" style={{ marginTop: 24 }}>Throughput & Distribution</div>
-        <div className="charts-row">
-          {/* Throughput Chart */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Event Throughput</div>
-                <div className="chart-subtitle">Events per second — live stream</div>
-              </div>
-              <div className="chart-badge">Live</div>
-            </div>
-            <div className="chart-area">
-              <ResponsiveContainer width="100%" height={220}>
-                <AreaChart data={timeSeriesData} margin={{ top: 4, right: 4, left: -10, bottom: 0 }}>
-                  <defs>
-                    <linearGradient id="throughputGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="#3b82f6" stopOpacity={0.20} />
-                      <stop offset="100%" stopColor="#3b82f6" stopOpacity={0} />
-                    </linearGradient>
-                  </defs>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                  <XAxis
-                    dataKey="timestamp"
-                    stroke="transparent"
-                    tick={{ fill: '#4a5568', fontSize: 10, fontFamily: 'IBM Plex Mono' }}
-                    tickLine={false}
-                    interval={4}
-                  />
-                  <YAxis
-                    stroke="transparent"
-                    tick={{ fill: '#4a5568', fontSize: 10, fontFamily: 'IBM Plex Mono' }}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <Tooltip content={<CustomTooltip color="#3b82f6" />} />
-                  <Area
-                    type="monotone"
-                    dataKey="events"
-                    stroke="#3b82f6"
-                    strokeWidth={2}
-                    fill="url(#throughputGrad)"
-                    dot={false}
-                    activeDot={{ r: 4, fill: '#3b82f6', strokeWidth: 0 }}
-                  />
-                </AreaChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Event Types */}
-          <div className="chart-card">
-            <div className="chart-header">
-              <div>
-                <div className="chart-title">Event Distribution</div>
-                <div className="chart-subtitle">Volume by type</div>
-              </div>
-            </div>
-            <div className="chart-area">
-              <ResponsiveContainer width="100%" height={220}>
-                <BarChart data={eventTypeData} margin={{ top: 4, right: 4, left: -10, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" vertical={false} />
-                  <XAxis
-                    dataKey="name"
-                    stroke="transparent"
-                    tick={{ fill: '#4a5568', fontSize: 10, fontFamily: 'IBM Plex Mono' }}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    stroke="transparent"
-                    tick={{ fill: '#4a5568', fontSize: 10, fontFamily: 'IBM Plex Mono' }}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <Tooltip content={<CustomTooltip color="#34d399" />} />
-                  <Bar dataKey="value" fill="#34d399" fillOpacity={0.7} radius={[3, 3, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+        {/* CHARTS ROW */}
+        <div className="section-head">
+          <span className="section-head-title">Throughput &amp; Distribution</span>
+          <div className="section-rule" />
         </div>
 
-        {/* Bottom Row */}
-        <div className="section-label" style={{ marginTop: 24 }}>Latency & Infrastructure</div>
-        <div className="bottom-row">
-          {/* Latency Card */}
-          <div className="chart-card">
-            <div className="chart-header">
+        <div className="row-2-1">
+          <div className="panel">
+            <div className="panel-head">
               <div>
-                <div className="chart-title">P99 Latency</div>
-                <div className="chart-subtitle">Read operation response times</div>
+                <div className="panel-title">Event Throughput</div>
+                <div className="panel-sub">Events per interval — simulated stream</div>
               </div>
-              <div className="chart-badge">Sub-100ms</div>
+              <span className="panel-tag live">● Live Sim</span>
             </div>
-            <div className="chart-area">
-              <ResponsiveContainer width="100%" height={160}>
-                <LineChart data={timeSeriesData} margin={{ top: 4, right: 4, left: -10, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.05)" />
-                  <XAxis
-                    dataKey="timestamp"
-                    stroke="transparent"
-                    tick={{ fill: '#4a5568', fontSize: 10, fontFamily: 'IBM Plex Mono' }}
-                    tickLine={false}
-                    interval={4}
-                  />
-                  <YAxis
-                    stroke="transparent"
-                    tick={{ fill: '#4a5568', fontSize: 10, fontFamily: 'IBM Plex Mono' }}
-                    tickLine={false}
-                    axisLine={false}
-                    unit="ms"
-                  />
-                  <Tooltip content={<CustomTooltip color="#fbbf24" />} />
-                  <Line
-                    type="monotone"
-                    dataKey="latency"
-                    stroke="#fbbf24"
-                    strokeWidth={1.5}
-                    dot={false}
-                    activeDot={{ r: 3, fill: '#fbbf24', strokeWidth: 0 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
+            <ResponsiveContainer width="100%" height={200}>
+              <AreaChart data={series} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
+                <defs>
+                  <linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%"   stopColor="#d4590a" stopOpacity={0.18} />
+                    <stop offset="100%" stopColor="#d4590a" stopOpacity={0}    />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="2 4" stroke="rgba(28,26,23,0.08)" />
+                <XAxis dataKey="timestamp" tick={{ fill: '#9b9485', fontSize: 9.5, fontFamily: 'Geist Mono, monospace' }} tickLine={false} axisLine={false} interval={5} />
+                <YAxis tick={{ fill: '#9b9485', fontSize: 9.5, fontFamily: 'Geist Mono, monospace' }} tickLine={false} axisLine={false} />
+                <Tooltip content={<CustomTooltip />} />
+                <Area type="monotone" dataKey="events" stroke="#d4590a" strokeWidth={2} fill="url(#g1)" dot={false} activeDot={{ r: 3, fill: '#d4590a', strokeWidth: 0 }} />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <div className="panel-title">By Type</div>
+                <div className="panel-sub">Volume distribution</div>
+              </div>
             </div>
-            <div className="latency-breakdown">
-              {latencyPercentiles.map(p => (
-                <div className="latency-row" key={p.label}>
-                  <span className="latency-label">{p.label}</span>
-                  <div className="latency-bar-bg">
-                    <div className="latency-bar-fill" style={{ width: `${p.value}%` }} />
+            <div className="dist-list">
+              {distData.slice(0, 6).map(d => (
+                <div className="dist-row" key={d.name}>
+                  <span className="dist-name">{d.name}</span>
+                  <div className="dist-bar-wrap">
+                    <div className="dist-bar" style={{ width: `${d.pct}%` }} />
                   </div>
-                  <span className="latency-val">{p.value}ms</span>
+                  <span className="dist-count">{d.value.toLocaleString()}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* BOTTOM ROW */}
+        <div className="section-head">
+          <span className="section-head-title">Latency &amp; Infrastructure</span>
+          <div className="section-rule" />
+        </div>
+
+        <div className="row-1-1">
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <div className="panel-title">Latency Percentiles</div>
+                <div className="panel-sub">Ingestion pipeline response times</div>
+              </div>
+              <span className="panel-tag ok">Sub-100ms</span>
+            </div>
+            <ResponsiveContainer width="100%" height={130}>
+              <BarChart data={barData} margin={{ top: 4, right: 4, left: -16, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="2 4" stroke="rgba(28,26,23,0.08)" vertical={false} />
+                <XAxis dataKey="name" tick={{ fill: '#9b9485', fontSize: 9, fontFamily: 'Geist Mono, monospace' }} tickLine={false} axisLine={false} />
+                <YAxis tick={{ fill: '#9b9485', fontSize: 9, fontFamily: 'Geist Mono, monospace' }} tickLine={false} axisLine={false} />
+                <Tooltip content={<CustomTooltip />} />
+                <Bar dataKey="value" fill="#d4590a" fillOpacity={0.65} radius={[2, 2, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+            <div className="lat-rows">
+              {LATENCY_PERCENTILES.map(p => (
+                <div className="lat-row" key={p.label}>
+                  <span className="lat-lbl">{p.label}</span>
+                  <div className="lat-track"><div className="lat-fill" style={{ width: `${(p.ms / maxPct) * 100}%` }} /></div>
+                  <span className="lat-val">{p.ms}ms</span>
                 </div>
               ))}
             </div>
           </div>
 
-          {/* System Health */}
-          <div className="health-card">
-            <div className="health-card-title">Infrastructure Health</div>
-            <div className="health-items">
-              {services.map(service => (
-                <div className="health-item" key={service}>
-                  <div className="health-item-left">
-                    <div className="health-dot" />
-                    <span className="health-label">{service}</span>
-                  </div>
-                  <div className="health-status-pill">Healthy</div>
+          <div className="panel">
+            <div className="panel-head">
+              <div>
+                <div className="panel-title">Infrastructure</div>
+                <div className="panel-sub">Component status</div>
+              </div>
+              <span className="panel-tag ok">All Nominal</span>
+            </div>
+            <table className="infra-table">
+              <thead>
+                <tr>
+                  <th>Component</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {INFRA.map(row => (
+                  <tr key={row.name}>
+                    <td style={{ fontFamily: 'var(--f-mono)', fontSize: 12 }}>{row.name}</td>
+                    <td style={{ color: 'var(--ink-4)', fontSize: 12 }}>{row.role}</td>
+                    <td>
+                      <span className="status-chip up">
+                        <span className="status-chip-dot" />UP
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        {/* EVENT LOG */}
+        <div className="section-head">
+          <span className="section-head-title">Live Event Stream</span>
+          <div className="section-rule" />
+        </div>
+
+        <div className="row-full">
+          <div className="panel" style={{ padding: 0 }}>
+            <div className="panel-head" style={{ padding: '14px 20px 12px', marginBottom: 0 }}>
+              <div>
+                <div className="panel-title">Ingestion Log</div>
+                <div className="panel-sub">Simulated event activity — newest first</div>
+              </div>
+              <span className="panel-tag live">● Streaming</span>
+            </div>
+            <div className="event-log" ref={logRef}>
+              {logLines.map(l => (
+                <div className="log-line" key={l.id}>
+                  <span className="log-time">{l.time}</span>
+                  <span className="log-type">{l.type}</span>
+                  <span className="log-uid">{l.userId}</span>
+                  <span className={l.status === 'OK' ? 'log-ok' : 'log-err'}>{l.status}</span>
                 </div>
               ))}
             </div>
-            <div style={{
-              marginTop: 18,
-              paddingTop: 16,
-              borderTop: '1px solid var(--border-subtle)',
-              display: 'flex',
-              justifyContent: 'space-between',
-              alignItems: 'center',
-            }}>
-              <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>All systems nominal</span>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
-                <TrendingUp size={13} style={{ color: 'var(--success)' }} />
-                <span style={{ color: 'var(--success)', fontFamily: 'IBM Plex Mono', fontSize: 11 }}>
-                  99.98% uptime
-                </span>
-              </div>
-            </div>
           </div>
         </div>
+
       </main>
 
-      {/* Footer */}
+      {/* ── FOOTER ─────────────────────────────────────────────────────── */}
       <footer className="footer">
-        <div className="footer-content">
-          <span>© 2026 EventFlow Platform</span>
-          <div className="footer-right">
+        <div className="footer-inner">
+          <span>© 2026 EventFlow Platform — Demo Mode</span>
+          <div className="footer-chips">
             <span>Apache Kafka 3.6</span>
-            <div className="footer-dot" />
-            <span>Java 17</span>
-            <div className="footer-dot" />
-            <span>v1.0.0</span>
+            <span className="footer-sep" />
+            <span>Java 21</span>
+            <span className="footer-sep" />
+            <span>Spring Boot 3.2.5</span>
+            <span className="footer-sep" />
+            <span>v1.0.0-SNAPSHOT</span>
           </div>
         </div>
       </footer>
+
     </div>
   );
 }
-
-export default App;

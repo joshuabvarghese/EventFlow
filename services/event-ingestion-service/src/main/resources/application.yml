@@ -1,0 +1,87 @@
+spring:
+  application:
+    name: event-ingestion-service
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: all
+      retries: 3
+      compression-type: snappy
+      batch-size: 16384
+      linger-ms: 10
+      properties:
+        enable.idempotence: true
+        max.in.flight.requests.per.connection: 5
+        request.timeout.ms: 30000
+        delivery.timeout.ms: 120000
+        client.id: ${spring.application.name}
+        # Stops Spring embedding __TypeId__ headers in messages.
+        # Without this, Kafka-UI and non-Spring consumers see deserialization errors.
+        spring.json.add.type.headers: false
+
+  # Spring Boot 3.x uses spring.data.redis (not spring.redis)
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2000ms
+      lettuce:
+        pool:
+          max-active: 16
+          max-idle: 8
+          min-idle: 2
+          max-wait: 2000ms
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+      indent-output: false
+
+server:
+  port: 8081
+  compression:
+    enabled: true
+    mime-types: application/json,text/event-stream,text/plain
+  tomcat:
+    threads:
+      max: 200
+      min-spare: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  tracing:
+    sampling:
+      probability: 0.1
+
+logging:
+  level:
+    root: INFO
+    com.platform: DEBUG
+    org.apache.kafka: WARN
+    org.springframework.kafka: INFO
+
+app:
+  cors:
+    allowed-origins:
+      - http://localhost:3000
+      - http://localhost:5173
+      - https://frontend.d1w981rd1y5z53.amplifyapp.com
