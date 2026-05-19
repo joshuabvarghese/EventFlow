@@ -402,3 +402,5 @@ body::before {
   .nav { display: none; }
   .header-inner { grid-template-columns: 1fr; height: auto; padding: 14px 0; }
 }
+
+.log-err { color: var(--red); text-align: right; }
