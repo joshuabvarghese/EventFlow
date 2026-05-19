@@ -46,3 +46,18 @@ volumes/
 # OS files
 .DS_Store
 Thumbs.db
+.terraform/
+*.tfstate
+*.tfstate.backup
+.env
+*.exe
+*.so
+*.dylib
+
+.terraform/
+*.tfstate
+*.tfstate.backup
+.env
+*.exe
+*.so
+*.dylib
