@@ -3,14 +3,11 @@ frontend:
   phases:
     preBuild:
       commands:
-        - node --version
-        - nvm install 20
-        - nvm use 20
-        - node --version
-        - cd frontend/dashboard && npm install 
+        - cd frontend/dashboard
+        - npm ci
     build:
       commands:
-        - cd frontend/dashboard && npm run build 
+        - npm run build
   artifacts:
     baseDirectory: frontend/dashboard/dist
     files:
