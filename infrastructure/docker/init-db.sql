@@ -15,13 +15,22 @@ CREATE TABLE IF NOT EXISTS events (
     correlation_id VARCHAR(255),
     data          JSONB,
     metadata      JSONB,
-    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+    created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+
+    -- Query-service columns (CQRS read side)
+    status          VARCHAR(20)  NOT NULL DEFAULT 'processed',
+    source_topic    VARCHAR(100),
+    event_timestamp TIMESTAMPTZ
 );
 
-CREATE INDEX idx_events_event_type  ON events (event_type);
-CREATE INDEX idx_events_user_id     ON events (user_id);
-CREATE INDEX idx_events_created_at  ON events (created_at DESC);
-CREATE INDEX idx_events_data_gin    ON events USING GIN (data);
+CREATE INDEX idx_events_event_type    ON events (event_type);
+CREATE INDEX idx_events_user_id       ON events (user_id);
+CREATE INDEX idx_events_created_at    ON events (created_at DESC);
+CREATE INDEX idx_events_data_gin      ON events USING GIN (data);
+CREATE INDEX idx_events_status        ON events (status);
+CREATE INDEX idx_events_source_topic  ON events (source_topic);
+CREATE INDEX idx_events_event_ts      ON events (event_timestamp DESC);
+CREATE INDEX idx_events_type_created  ON events (event_type, created_at DESC);
 
 -- Dead-letter queue table
 CREATE TABLE IF NOT EXISTS dead_letter_events (

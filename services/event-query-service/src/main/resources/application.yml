@@ -1,0 +1,92 @@
+spring:
+  application:
+    name: event-query-service
+
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DB:events_db}
+    username: ${POSTGRES_USER:platform}
+    password: ${POSTGRES_PASSWORD:platform123}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      # The schema is owned by init-db.sql; we only validate here.
+      # Switch to 'update' if you want JPA to manage the status column.
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        jdbc:
+          time_zone: UTC
+        format_sql: false
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    consumer:
+      group-id: event-query-group
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      max-poll-records: 500
+      fetch-min-size: 1
+      fetch-max-wait: 500ms
+      properties:
+        # Accept any type from the ingestion service (which strips __TypeId__ headers)
+        spring.json.trusted.packages: "*"
+        spring.json.use.type.headers: false
+        spring.json.value.default.type: java.util.Map
+
+  jackson:
+    default-property-inclusion: non_null
+    serialization:
+      write-dates-as-timestamps: false
+
+server:
+  port: 8083
+  compression:
+    enabled: true
+    mime-types: application/json,text/plain
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  level:
+    root: INFO
+    com.platform: DEBUG
+    org.apache.kafka: WARN
+    org.springframework.kafka: INFO
+    org.hibernate.SQL: WARN
+
+app:
+  cors:
+    allowed-origins:
+      - http://localhost:3000
+      - http://localhost:5173
+      - https://frontend.d1w981rd1y5z53.amplifyapp.com
+  kafka:
+    # Regex pattern — consumes from all routed event topics, excludes DLQ
+    topics-pattern: "events\\.(raw|user|transaction|analytics|system|critical|validated)"
+  query:
+    default-page-size: 50
+    max-page-size: 200

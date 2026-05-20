@@ -14,7 +14,7 @@
 
 ## 📊 **Live Demo**
 
-**Frontend Dashboard:** [https://frontend.d1w981rd1y5z53.amplifyapp.com](https://frontend.d1w981rd1y5z53.amplifyapp.com/)
+**Frontend Dashboard:** [https://frontend.d1w981rd1y5z53.amplifyapp.com](https://frontend.d1w981rd1y5z53.amplifyapp.com)
 
 
 ---

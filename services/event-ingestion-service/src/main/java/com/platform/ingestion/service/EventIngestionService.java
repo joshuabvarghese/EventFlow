@@ -1,5 +1,14 @@
 package com.platform.ingestion.service;
 
+import com.platform.ingestion.kafka.EventProducer;
+import com.platform.ingestion.model.Event;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.Timer;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.stereotype.Service;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -9,17 +18,6 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-
-import org.springframework.data.redis.core.RedisTemplate;
-import org.springframework.stereotype.Service;
-
-import com.platform.ingestion.kafka.EventProducer;
-import com.platform.ingestion.model.Event;
-
-import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.Timer;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 
 /**
  * Core event ingestion service.
@@ -136,7 +134,7 @@ public class EventIngestionService {
      *   totalProcessed:  number,
      *   totalFailed:     number,
      *   totalDuplicated: number,
-     *   successRate:     number,   // 0 to 100
+     *   successRate:     number,   // 0–100
      *   eventsByType:    Record&lt;string, number&gt;,
      *   uptimeSeconds:   number
      * }

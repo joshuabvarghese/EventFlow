@@ -161,6 +161,37 @@ services:
       retries: 10
       start_period: 60s
 
+  # ── Query Service (CQRS read side) ───────────────────────────────────────────
+
+  event-query-service:
+    build:
+      context: ../../services/event-query-service
+      dockerfile: Dockerfile
+    container_name: event-query-service
+    restart: unless-stopped
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8083:8083"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: events_db
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform123
+    networks:
+      - platform-network
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:8083/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
   # ── Observability ─────────────────────────────────────────────────────────────
 
   prometheus:

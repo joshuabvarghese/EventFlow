@@ -5,19 +5,12 @@
          http://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <!--
-      Standalone pom — no parent element.
-      The original project had a multi-module parent pom that is absent from
-      the repository, causing "Non-resolvable parent POM" at every build.
-      All dependency versions are managed here via the Spring Boot BOM import.
-    -->
-
     <groupId>com.platform</groupId>
-    <artifactId>event-ingestion-service</artifactId>
+    <artifactId>event-query-service</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
-    <name>Event Ingestion Service</name>
-    <description>High-throughput event ingestion with Kafka, Redis deduplication, and Prometheus metrics</description>
+    <name>Event Query Service</name>
+    <description>CQRS read side — consumes events from Kafka, persists to PostgreSQL, exposes REST query API</description>
 
     <properties>
         <java.version>21</java.version>
@@ -28,7 +21,6 @@
         <lombok.version>1.18.30</lombok.version>
     </properties>
 
-    <!-- Import Spring Boot BOM so child deps don't need versions -->
     <dependencyManagement>
         <dependencies>
             <dependency>
@@ -42,15 +34,10 @@
     </dependencyManagement>
 
     <dependencies>
-        <!-- Spring Boot starters -->
+        <!-- Web -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
-        </dependency>
-        <!-- WebFlux: needed for Flux/Mono SSE stream endpoint -->
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-webflux</artifactId>
         </dependency>
         <dependency>
             <groupId>org.springframework.boot</groupId>
@@ -60,12 +47,19 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-actuator</artifactId>
         </dependency>
+
+        <!-- Persistence -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-data-redis</artifactId>
+            <artifactId>spring-boot-starter-data-jpa</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>runtime</scope>
         </dependency>
 
-        <!-- Kafka -->
+        <!-- Kafka consumer -->
         <dependency>
             <groupId>org.springframework.kafka</groupId>
             <artifactId>spring-kafka</artifactId>
@@ -75,14 +69,6 @@
         <dependency>
             <groupId>io.micrometer</groupId>
             <artifactId>micrometer-registry-prometheus</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.micrometer</groupId>
-            <artifactId>micrometer-tracing-bridge-brave</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>io.zipkin.reporter2</groupId>
-            <artifactId>zipkin-reporter-brave</artifactId>
         </dependency>
 
         <!-- Jackson -->
@@ -95,10 +81,7 @@
             <artifactId>jackson-datatype-jsr310</artifactId>
         </dependency>
 
-        <!--
-          Lombok: optional=true keeps it off the runtime classpath.
-          Version pinned explicitly so it matches annotationProcessorPaths below.
-        -->
+        <!-- Lombok -->
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>
@@ -121,12 +104,6 @@
 
     <build>
         <plugins>
-            <!--
-              maven-compiler-plugin 3.11.0 with explicit annotationProcessorPaths.
-              Without this block, javac does not run Lombok as a proper annotation
-              processor on Java 21 + macOS, causing "cannot find symbol" for every
-              generated field/method (@Slf4j → log, @Builder → builder(), etc.).
-            -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
@@ -144,7 +121,6 @@
                     </annotationProcessorPaths>
                 </configuration>
             </plugin>
-
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
@@ -159,9 +135,7 @@
                 </configuration>
                 <executions>
                     <execution>
-                        <goals>
-                            <goal>repackage</goal>
-                        </goals>
+                        <goals><goal>repackage</goal></goals>
                     </execution>
                 </executions>
             </plugin>
