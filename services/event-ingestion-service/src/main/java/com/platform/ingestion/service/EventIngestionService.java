@@ -69,7 +69,7 @@ public class EventIngestionService {
     public boolean ingest(Event event) {
         totalEventsReceived.incrementAndGet();
 
-        final Boolean result = ingestionTimer.record(() -> {
+        Boolean result = ingestionTimer.record(() -> {
             try {
                 if (isDuplicate(event)) {
                     log.info("Duplicate skipped: eventId={}", event.eventId());
@@ -80,7 +80,7 @@ public class EventIngestionService {
 
                 markAsSeen(event);
 
-                final String topic = topicFor(event);
+                String topic = topicFor(event);
                 eventProducer.send(topic, event.userId(), event);
 
                 totalEventsProcessed.incrementAndGet();
@@ -93,7 +93,7 @@ public class EventIngestionService {
                         event.eventId(), event.eventType(), topic);
                 return Boolean.TRUE;
 
-            } catch (final Exception e) {
+            } catch (Exception e) {
                 totalEventsFailed.incrementAndGet();
                 eventsFailedCounter.increment();
                 log.error("Ingestion failed: eventId={}", event.eventId(), e);
